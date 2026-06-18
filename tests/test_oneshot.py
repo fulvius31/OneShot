@@ -85,7 +85,7 @@ class TestPinGeneration(unittest.TestCase):
     def test_mac_algo_pins_are_valid_8_digit(self):
         mac = '00:90:4C:C1:AC:21'
         for algo, meta in self.gen.algos.items():
-            if meta['mode'] != self.gen.ALGO_MAC:
+            if meta['mode'] != self.gen.ALGO_MAC or meta.get('needs'):
                 continue
             pin = self.gen.generate(algo, mac)
             self.assertEqual(len(pin), 8, f'{algo}: {pin!r}')
@@ -108,6 +108,75 @@ class TestArrisFib(unittest.TestCase):
     def test_base_and_sequence(self):
         fib = oneshot._arris_fib
         self.assertEqual([fib(n) for n in range(7)], [1, 1, 1, 2, 3, 5, 8])
+
+
+def _calc_pre_multiplied(pin):
+    """Independent reimplementation of the reference checksum (calculatePreMultiplied)."""
+    pin *= 10
+    accum = 0
+    accum += 3 * ((pin // 10000000) % 10)
+    accum += (pin // 1000000) % 10
+    accum += 3 * ((pin // 100000) % 10)
+    accum += (pin // 10000) % 10
+    accum += 3 * ((pin // 1000) % 10)
+    accum += (pin // 100) % 10
+    accum += 3 * ((pin // 10) % 10)
+    return (10 - accum % 10) % 10
+
+
+class TestNewAlgorithms(unittest.TestCase):
+    def setUp(self):
+        self.gen = WPSpin()
+        self.mac = '00:11:22:33:44:55'
+
+    def _is_valid_pin(self, pin):
+        return (len(pin) == 8 and pin.isdigit()
+                and int(pin[7]) == self.gen.checksum(int(pin[:7])))
+
+    def test_checksum_matches_reference(self):
+        for p in (0, 1, 1234567, 7654321, 9999999, 8472405):
+            self.assertEqual(self.gen.checksum(p), _calc_pre_multiplied(p))
+
+    def test_bit_based_match_reference_substrings(self):
+        # OneShot uses mac.integer masks; the reference uses hex substrings.
+        # They must agree (differential check), and the final PIN must be valid.
+        machex = self.mac.replace(':', '')
+        for algo, start in [('pin36', 3), ('pin40', 2), ('pin44', 1), ('pin48', 0)]:
+            raw = int(machex[start:], 16) % 10000000
+            expected = '{:07d}{}'.format(raw, self.gen.checksum(raw))
+            self.assertEqual(self.gen.generate(algo, self.mac), expected, algo)
+            self.assertTrue(self._is_valid_pin(self.gen.generate(algo, self.mac)), algo)
+
+    def test_fte_known_vector(self):
+        # machex[6:8]='33', ssid[-2:]='AB' -> int('33AB',16)=13227 -> +7=13234
+        raw = 13234
+        expected = '{:07d}{}'.format(raw, self.gen.checksum(raw))
+        self.assertEqual(self.gen.generate('pinFTE', self.mac, ssid='Jazztel_AB'), expected)
+
+    def test_fte_requires_ssid(self):
+        self.assertEqual(self.gen.generate('pinFTE', self.mac, ssid=None), '')
+        self.assertEqual(self.gen.generate('pinFTE', self.mac, ssid='x'), '')
+
+    def test_belkin_and_orange_are_valid_pins(self):
+        for algo in ('pinBelkin', 'pinOrange'):
+            pin = self.gen.generate(algo, self.mac, serial='1234567890')
+            self.assertTrue(self._is_valid_pin(pin), '{}: {!r}'.format(algo, pin))
+            # deterministic
+            self.assertEqual(pin, self.gen.generate(algo, self.mac, serial='1234567890'))
+
+    def test_serial_algos_require_serial(self):
+        self.assertEqual(self.gen.generate('pinBelkin', self.mac, serial=None), '')
+        self.assertEqual(self.gen.generate('pinOrange', self.mac, serial='12'), '')
+
+    def test_suggested_list_gating(self):
+        # Without ssid/serial, FTE/Belkin/Orange are skipped; all results valid 8-digit.
+        plain = self.gen.getSuggestedList(self.mac)
+        self.assertTrue(all(len(p) == 8 and p.isdigit() for p in plain if p))
+        # With ssid, FTE appears; with serial, Belkin/Orange appear.
+        with_ssid = self.gen.getSuggestedList(self.mac, ssid='Jazztel_AB')
+        with_serial = self.gen.getSuggestedList(self.mac, serial='1234567890')
+        self.assertGreater(len(with_ssid), len(plain))
+        self.assertGreater(len(with_serial), len(plain))
 
 
 class TestSecurityRegressions(unittest.TestCase):

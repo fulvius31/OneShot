@@ -6,6 +6,7 @@
  - [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack);
  - integrated [3WiFi offline WPS PIN generator](https://3wifi.stascorp.com/wpspin);
  - [online WPS bruteforce](https://sviehb.files.wordpress.com/2011/12/viehboeck_wps.pdf);
+ - a broad set of offline WPS PIN algorithms: 24/28/32/36/40/44/48-bit, D-Link(+1), ASUS, Airocon, EasyBox, Arris, TrendNet, FTE, plus serial-based Belkin and Orange (see `--serial`);
  - built-in **pure-Python nl80211 (netlink) Wi-Fi scanner** — talks to the kernel directly, so the `iw` binary is no longer required (handy on Android/Termux), with automatic fallback to `iw`;
  - Wi-Fi scanner with vulnerability highlighting.
 # Requirements
@@ -128,6 +129,7 @@ Please note that root access is required.
      --scanner={auto|nl80211|iw} : Wi-Fi scan backend [auto]. 'auto' uses the built-in
                                 nl80211 netlink scanner and falls back to 'iw'; 'nl80211'
                                 forces the built-in scanner (no iw binary); 'iw' uses iw.
+     --serial=<serial>        : Device serial number — enables the Belkin and Orange PIN algorithms
      --mtk-wifi               : Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
                                 (for internal Wi-Fi adapters implemented in MediaTek SoCs). Turn off Wi-Fi in the system settings before using this.
      -v, --verbose            : Verbose output
