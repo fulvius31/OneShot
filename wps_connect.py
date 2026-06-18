@@ -340,6 +340,7 @@ class WpsRegistrar:
         encr = build_encrypted_settings(self.keywrapkey, self.authkey,
                                         attr(ATTR_R_SNONCE1, self.rs1))
         body = (_version_attrs() + attr_u8(ATTR_MSG_TYPE, WPS_M4)
+                + attr(ATTR_ENROLLEE_NONCE, self.nonce_e)
                 + attr(ATTR_R_HASH1, r_hash1) + attr(ATTR_R_HASH2, r_hash2)
                 + attr(ATTR_ENCR_SETTINGS, encr))
         auth = authenticator(self.authkey, self._last_recv, body)
@@ -364,6 +365,7 @@ class WpsRegistrar:
         encr = build_encrypted_settings(self.keywrapkey, self.authkey,
                                         attr(ATTR_R_SNONCE2, self.rs2))
         body = (_version_attrs() + attr_u8(ATTR_MSG_TYPE, WPS_M6)
+                + attr(ATTR_ENROLLEE_NONCE, self.nonce_e)
                 + attr(ATTR_ENCR_SETTINGS, encr))
         auth = authenticator(self.authkey, self._last_recv, body)
         msg = body + attr(ATTR_AUTHENTICATOR, auth)
@@ -438,7 +440,9 @@ NL80211_ATTR_MAC = 6
 NL80211_ATTR_SSID = 52
 NL80211_ATTR_AUTH_TYPE = 53
 NL80211_ATTR_IE = 42
-NL80211_ATTR_SOCKET_OWNER = 206
+NL80211_ATTR_WIPHY_FREQ = 38
+NL80211_ATTR_STATUS_CODE = 48
+NL80211_ATTR_SOCKET_OWNER = 204
 NL80211_AUTHTYPE_OPEN_SYSTEM = 0
 ATTR_REQUEST_TYPE = 0x103a
 WPS_REQ_TYPE_REGISTRAR = 0x02
@@ -446,37 +450,87 @@ WPS_REQ_TYPE_REGISTRAR = 0x02
 
 def wsc_assoc_ie():
     """WSC IE for the (re)association request advertising an External Registrar."""
-    body = (WFA_VENDOR_EXT
-            + struct.pack('B', 0x04)                       # WSC IE type
+    body = (b'\x00\x50\xf2\x04'                            # WPS OUI 00:50:F2 + type 0x04
             + attr_u8(ATTR_VERSION, WPS_VERSION)
             + attr_u8(ATTR_REQUEST_TYPE, WPS_REQ_TYPE_REGISTRAR))
     return bytes([0xDD, len(body)]) + body                 # element id 221 (vendor)
 
 
-def associate(interface, bssid_bytes, ssid_bytes):
+def _lookup_freq(interface, bssid):
+    """Find the AP's frequency from a scan (also warms the kernel scan cache)."""
+    import nl80211_scan as nl
+    try:
+        for net in nl.scan(interface):
+            if net.get('BSSID') == bssid and net.get('Frequency'):
+                return net['Frequency']
+    except Exception:
+        pass
+    return 0
+
+
+def associate(interface, bssid_bytes, ssid_bytes, freq=0):
     """Associate in MANAGED mode via nl80211 NL80211_CMD_CONNECT (no monitor mode).
 
     Returns an open netlink socket that OWNS the connection (SOCKET_OWNER) — keep
     it open for the duration of the WPS exchange; closing it tears the link down.
-    Raises OSError/Nl80211Error on failure. LIVE PATH — needs root + a real adapter.
+    Raises Nl80211Error on failure. LIVE PATH — needs root + a real adapter.
     """
     import nl80211_scan as nl
     ifindex = socket.if_nametoindex(interface)
+    bssid_str = ':'.join('%02X' % b for b in bssid_bytes)
+    if not freq:
+        freq = _lookup_freq(interface, bssid_str)   # also populates the scan cache
     sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, nl.NETLINK_GENERIC)
     sock.bind((0, 0))
     sock.settimeout(8)
-    family_id, _ = nl._resolve_family(sock, 'nl80211')
-    attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
-             + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
-             + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
-             + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
-             + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
-             + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
-    nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, 10,
-                                nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
-    for _ in nl._read_until_done(sock):   # consume CONNECT ACK
-        pass
-    return sock
+    try:
+        family_id, _ = nl._resolve_family(sock, 'nl80211')
+        attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
+                 + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
+                 + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
+                 + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
+                 + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
+                 + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
+        if freq:
+            attrs += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
+        nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, 10,
+                                    nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
+        for _ in nl._read_until_done(sock):   # consume the synchronous CONNECT ACK
+            pass
+        # CONNECT is asynchronous: wait for the result event and check its status.
+        _await_connect_result(sock, family_id)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def _await_connect_result(sock, family_id):
+    """Block for the NL80211_CMD_CONNECT result event; raise if status != 0."""
+    import nl80211_scan as nl
+    while True:
+        try:
+            data = sock.recv(65536)
+        except socket.timeout:
+            raise nl.Nl80211Error('association timed out (no CONNECT result event)')
+        i = 0
+        while i + 16 <= len(data):
+            mlen, mtype = struct.unpack_from('=IH', data, i)[:2]
+            if mlen < 16:
+                break
+            payload = data[i + 16:i + mlen]
+            if mtype == family_id and payload and payload[0] == NL80211_CMD_CONNECT:
+                cattrs = nl._parse_attrs(payload[4:])
+                sc = cattrs.get(NL80211_ATTR_STATUS_CODE)
+                status = struct.unpack('=H', sc[:2])[0] if sc and len(sc) >= 2 else 0
+                if status != 0:
+                    raise nl.Nl80211Error('association rejected (status {})'.format(status))
+                return
+            i += _align_msg(mlen)
+
+
+def _align_msg(n):
+    return (n + 3) & ~3
 
 
 def _mac_bytes(bssid):
@@ -500,6 +554,42 @@ class WpsConnection:
         with open('/sys/class/net/{}/address'.format(self.interface)) as f:
             return _mac_bytes(f.read().strip())
 
+    @staticmethod
+    def _recv_eap(eapol):
+        """Receive one logical EAP packet, reassembling EAP-WSC MF fragments.
+
+        Acks each non-final fragment with WSC_FRAG_ACK. Returns a parse_eap()
+        dict whose 'message' is the fully reassembled WSC message, or None on
+        timeout.
+        """
+        try:
+            while True:
+                etype, payload = parse_eapol(eapol.recv())
+                if etype != EAPOL_TYPE_EAP:
+                    continue
+                info = parse_eap(payload)
+                if info.get('type') != EAP_TYPE_EXPANDED or not (info.get('flags', 0) & WSC_FLAGS_MF):
+                    return info
+                # Fragmented message: accumulate until a fragment clears MF.
+                parts = [info.get('message', b'')]
+                ident, op_code = info['id'], info['op_code']
+                while True:
+                    eapol.send(eap_wsc_response(ident, WSC_FRAG_ACK, b''))
+                    etype, payload = parse_eapol(eapol.recv())
+                    if etype != EAPOL_TYPE_EAP:
+                        continue
+                    frag = parse_eap(payload)
+                    if frag.get('type') != EAP_TYPE_EXPANDED or frag.get('op_code') != op_code:
+                        continue
+                    parts.append(frag.get('message', b''))
+                    ident = frag['id']
+                    if not (frag.get('flags', 0) & WSC_FLAGS_MF):
+                        info['message'] = b''.join(parts)
+                        info['id'] = ident
+                        return info
+        except socket.timeout:
+            return None
+
     def _drive(self, reg, stop_after_m3):
         """Associate, then pump the EAP-WSC exchange. Returns the WpsRegistrar."""
         conn = associate(self.interface, _mac_bytes(self.bssid), self.ssid.encode())
@@ -507,10 +597,9 @@ class WpsConnection:
         try:
             eapol.send(eapol_start())
             while True:
-                etype, payload = parse_eapol(eapol.recv())
-                if etype != EAPOL_TYPE_EAP:
-                    continue
-                info = parse_eap(payload)
+                info = self._recv_eap(eapol)
+                if info is None:
+                    break
                 if info['code'] == EAP_CODE_FAIL:
                     break
                 if info.get('type') == EAP_TYPE_IDENTITY and info['code'] == EAP_CODE_REQUEST:
@@ -534,7 +623,9 @@ class WpsConnection:
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m6()))
                 elif mtype == bytes([WPS_M7]):
                     reg.process_m7(msg)
-                    eapol.send(eap_wsc_response(info['id'], WSC_Done, b''))
+                    # Learn-only registrar: NACK to abort cleanly (do not send
+                    # WSC_Done, which is the enrollee's op-code).
+                    eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
                     break
             return reg
         finally:

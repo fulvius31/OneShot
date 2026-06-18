@@ -188,6 +188,7 @@ def _new_network():
         'Model number': '',
         'Device name': '',
         'Level': 0,
+        'Frequency': 0,
     }
 
 
@@ -202,6 +203,10 @@ def _parse_bss(bss_attrs):
     sig = bss_attrs.get(NL80211_BSS_SIGNAL_MBM)
     if sig and len(sig) >= 4:
         net['Level'] = struct.unpack('=i', sig[:4])[0] // 100
+
+    freq = bss_attrs.get(NL80211_BSS_FREQUENCY)
+    if freq and len(freq) >= 4:
+        net['Frequency'] = struct.unpack('=I', freq[:4])[0]
 
     capability = 0
     cap_raw = bss_attrs.get(NL80211_BSS_CAPABILITY)

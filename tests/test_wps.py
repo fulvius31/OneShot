@@ -188,6 +188,23 @@ class TestFullPinPath(unittest.TestCase):
         self.assertEqual(cred['psk'], 'CorrectHorseBattery')
         self.assertEqual(cred['ssid'], 'TestNet')
 
+    def test_m4_m6_carry_enrollee_nonce(self):
+        # Mandatory ATTR_ENROLLEE_NONCE — real hostapd enrollees NACK without it.
+        enrollee = _MirrorEnrollee(pin='12345670')
+        reg = wps.WpsRegistrar(registrar_mac=b'\x00\x11\x22\x33\x44\x55', pin='12345670')
+        reg.process_m1(enrollee.build_m1())
+        enrollee.recv_m2(reg.build_m2(), reg.pkr)
+        reg.process_m3(enrollee.build_m3(reg.pke, reg.pkr))
+        for msg in (reg.build_m4(), (reg.process_m5(enrollee.build_m5()) or reg.build_m6())):
+            self.assertEqual(wps.attrs_dict(msg).get(wps.ATTR_ENROLLEE_NONCE), reg.nonce_e)
+
+
+class TestAssocIe(unittest.TestCase):
+    def test_wsc_assoc_ie_uses_wps_oui(self):
+        ie = wps.wsc_assoc_ie()
+        self.assertEqual(ie[0], 0xDD)                       # vendor element
+        self.assertEqual(ie[2:6], b'\x00\x50\xf2\x04')     # WPS OUI + type, not 00:37:2A
+
     def test_wrong_pin_fails_first_half(self):
         enrollee = _MirrorEnrollee(pin='12345670')
         reg = wps.WpsRegistrar(registrar_mac=b'\x00\x11\x22\x33\x44\x55', pin='00000000')

@@ -997,7 +997,7 @@ class Companion:
         while int(f_half) < 10000:
             t = int(f_half + '000')
             pin = '{}000{}'.format(f_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin=pin)
             if self.connection_status.isFirstHalfValid():
                 print('[+] First half found')
                 return f_half
@@ -1026,7 +1026,7 @@ class Companion:
         while int(s_half) < 1000:
             t = int(f_half + s_half)
             pin = '{}{}{}'.format(f_half, s_half, checksum(t))
-            self.single_connection(bssid, pin)
+            self.single_connection(bssid, pin=pin)
             if self.connection_status.last_m_message > 6:
                 return pin
             elif self.connection_status.status == 'WPS_FAIL':
@@ -1500,6 +1500,9 @@ if __name__ == '__main__':
 
     if args.engine == 'native' and not (args.pixie_dust or args.pin):
         die("--engine native needs -K (Pixie-Dust) or -p <pin> (full PIN connection)")
+    if args.engine == 'native' and args.bruteforce:
+        die("--engine native does not support -B (online bruteforce): the native "
+            "engine cannot report per-PIN M-message progress")
 
     if args.mtk_wifi:
         wmtWifi_device = Path("/dev/wmtWifi")
