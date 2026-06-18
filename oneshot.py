@@ -374,6 +374,7 @@ class ConnectionStatus:
         self.status = ''   # Must be WSC_NACK, WPS_FAIL or GOT_PSK
         self.last_m_message = 0
         self.essid = ''
+        self.bssid = ''
         self.wpa_psk = ''
 
     def isFirstHalfValid(self):
@@ -418,6 +419,9 @@ class BruteforceStatus:
 
 class Companion:
     """Main application part"""
+
+    MAX_WPS_FAIL_RETRIES = 5
+
     def __init__(self, interface, save_result=False, print_debug=False):
         self.interface = interface
         self.save_result = save_result
@@ -754,7 +758,7 @@ class Companion:
         elif pixiemode:
             if self.pixie_creds.got_all():
                 pixiedust_pin = self.__runPixiewps(showpixiecmd, pixieforce)
-                if pin:
+                if pixiedust_pin:
                     return self.__wps_connection(bssid, pixiedust_pin, pixiemode=False)
                 return False
             else:
@@ -771,6 +775,7 @@ class Companion:
         @f_half — 4-character string
         """
         checksum = self.generator.checksum
+        fails = 0
         while int(f_half) < 10000:
             t = int(f_half + '000')
             pin = '{}000{}'.format(f_half, checksum(t))
@@ -779,8 +784,13 @@ class Companion:
                 print('[+] First half found')
                 return f_half
             elif self.connection_status.status == 'WPS_FAIL':
+                fails += 1
+                if fails > self.MAX_WPS_FAIL_RETRIES:
+                    print('[!] Too many consecutive WPS failures, aborting')
+                    return False
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__first_half_bruteforce(bssid, f_half)
+                continue   # retry the same f_half without advancing
+            fails = 0
             f_half = str(int(f_half) + 1).zfill(4)
             self.bruteforce.registerAttempt(f_half)
             if delay:
@@ -794,6 +804,7 @@ class Companion:
         @s_half — 3-character string
         """
         checksum = self.generator.checksum
+        fails = 0
         while int(s_half) < 1000:
             t = int(f_half + s_half)
             pin = '{}{}{}'.format(f_half, s_half, checksum(t))
@@ -801,15 +812,20 @@ class Companion:
             if self.connection_status.last_m_message > 6:
                 return pin
             elif self.connection_status.status == 'WPS_FAIL':
+                fails += 1
+                if fails > self.MAX_WPS_FAIL_RETRIES:
+                    print('[!] Too many consecutive WPS failures, aborting')
+                    return False
                 print('[!] WPS transaction failed, re-trying last pin')
-                return self.__second_half_bruteforce(bssid, f_half, s_half)
+                continue   # retry the same s_half without advancing
+            fails = 0
             s_half = str(int(s_half) + 1).zfill(3)
             self.bruteforce.registerAttempt(f_half + s_half)
             if delay:
                 time.sleep(delay)
         return False
 
-    def smart_bruteforce(self, bssid, start_pin=None, delay=None):
+    def smart_bruteforce(self, bssid, start_pin=None, delay=None, loop=False):
         if (not start_pin) or (len(start_pin) < 4):
             # Trying to restore previous session
             try:
@@ -842,7 +858,7 @@ class Companion:
             with open(filename, 'w') as file:
                 file.write(self.bruteforce.mask)
             print('[i] Session saved in {}'.format(filename))
-            if args.loop:
+            if loop:
                 raise KeyboardInterrupt
 
     def cleanup(self):
