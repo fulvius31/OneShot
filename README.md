@@ -8,6 +8,7 @@
  - [online WPS bruteforce](https://sviehb.files.wordpress.com/2011/12/viehboeck_wps.pdf);
  - a broad set of offline WPS PIN algorithms: 24/28/32/36/40/44/48-bit, D-Link(+1), ASUS, Airocon, EasyBox, Arris, TrendNet, FTE, plus serial-based Belkin and Orange (see `--serial`);
  - built-in **pure-Python nl80211 (netlink) Wi-Fi scanner** — talks to the kernel directly, so the `iw` binary is no longer required (handy on Android/Termux), with automatic fallback to `iw`;
+ - optional built-in **pure-Python WPS engine** (`--engine native`) — associates via nl80211 and runs the EAP-WSC exchange itself (no `wpa_supplicant`, no monitor mode); supports Pixie-Dust and full PIN→PSK recovery;
  - Wi-Fi scanner with vulnerability highlighting.
 # Requirements
  - Python 3.6 and above (standard library only — no `pip` packages needed);
@@ -130,6 +131,9 @@ Please note that root access is required.
                                 nl80211 netlink scanner and falls back to 'iw'; 'nl80211'
                                 forces the built-in scanner (no iw binary); 'iw' uses iw.
      --serial=<serial>        : Device serial number — enables the Belkin and Orange PIN algorithms
+     --engine={wpa_supplicant|native} : WPS engine [wpa_supplicant]. 'native' is the
+                                built-in pure-Python nl80211+EAPOL engine (no wpa_supplicant,
+                                no monitor mode; root only). Use with -K (Pixie-Dust) or -p (PIN).
      --mtk-wifi               : Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
                                 (for internal Wi-Fi adapters implemented in MediaTek SoCs). Turn off Wi-Fi in the system settings before using this.
      -v, --verbose            : Verbose output
@@ -156,6 +160,17 @@ Scan without the `iw` binary (force the built-in nl80211 scanner):
  ```
  sudo python3 oneshot.py -i wlan0 -K --scanner nl80211
  ```
+Run Pixie-Dust with the built-in WPS engine (no `wpa_supplicant`):
+ ```
+ sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -K --engine native
+ ```
+
+> **`--engine native` is experimental.** The crypto and protocol layers are
+> unit-tested, but the live nl80211 association + EAPOL path is driver-dependent
+> and must be validated on real hardware. It needs root, a free `wlan0` (stop
+> NetworkManager / the system `wpa_supplicant` first, e.g. `--iface-down`), and
+> `pixiewps` for the `-K` crack. If it fails on your adapter, use the default
+> `wpa_supplicant` engine.
 
 ## Where results are stored
 OneShot keeps its data under `~/.OneShot/` (of the user it runs as — i.e. `root` when run with `sudo`):

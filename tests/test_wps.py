@@ -58,6 +58,7 @@ class _MirrorEnrollee:
         return wc.authenticator(self.authkey, self._m1, body) == auth
 
     def build_m3(self, pke, pkr):
+        self.pke, self.pkr = pke, pkr
         psk1, psk2 = wc.derive_psk(self.authkey, self.pin)
         eh1 = wc.wps_hash(self.authkey, self.es1, psk1, pke, pkr)
         eh2 = wc.wps_hash(self.authkey, self.es2, psk2, pke, pkr)
@@ -65,6 +66,22 @@ class _MirrorEnrollee:
                 + wps.attr_u8(wps.ATTR_MSG_TYPE, wps.WPS_M3)
                 + wps.attr(wps.ATTR_E_HASH1, eh1)
                 + wps.attr(wps.ATTR_E_HASH2, eh2))
+
+    def build_m5(self):
+        # send the real E-S1 back (proves we used the same PIN half)
+        inner = wps.attr(wps.ATTR_E_SNONCE1, self.es1)
+        encr = wps.build_encrypted_settings(self.keywrapkey, self.authkey, inner)
+        return (wps.attr_u8(wps.ATTR_MSG_TYPE, wps.WPS_M5)
+                + wps.attr(wps.ATTR_ENCR_SETTINGS, encr))
+
+    def build_m7(self, network_key=b'CorrectHorseBattery', ssid=b'TestNet'):
+        # the AP's current credential travels in M7's Encrypted Settings
+        inner = (wps.attr(wps.ATTR_E_SNONCE2, self.es2)
+                 + wps.attr(wps.ATTR_SSID, ssid)
+                 + wps.attr(wps.ATTR_NETWORK_KEY, network_key))
+        encr = wps.build_encrypted_settings(self.keywrapkey, self.authkey, inner)
+        return (wps.attr_u8(wps.ATTR_MSG_TYPE, wps.WPS_M7)
+                + wps.attr(wps.ATTR_ENCR_SETTINGS, encr))
 
 
 class TestDhAndKdf(unittest.TestCase):
@@ -147,6 +164,48 @@ class TestRegistrarExchange(unittest.TestCase):
         psk1, psk2 = wc.derive_psk(reg.authkey, enrollee.pin)
         eh1 = wc.wps_hash(reg.authkey, enrollee.es1, psk1, reg.pke, reg.pkr)
         self.assertEqual(eh1.hex().upper(), data['e_hash1'])
+
+
+class TestFullPinPath(unittest.TestCase):
+    """Phase 2: M1..M7 with AES Encrypted Settings -> recovered PSK."""
+
+    def test_psk_recovered_with_correct_pin(self):
+        enrollee = _MirrorEnrollee(pin='12345670')
+        reg = wps.WpsRegistrar(registrar_mac=b'\x00\x11\x22\x33\x44\x55', pin='12345670')
+
+        reg.process_m1(enrollee.build_m1())
+        self.assertTrue(enrollee.recv_m2(reg.build_m2(), reg.pkr))
+        reg.process_m3(enrollee.build_m3(reg.pke, reg.pkr))
+
+        reg.build_m4()                       # R-Hash1/2 + Encrypted{R-S1}
+        reg.process_m5(enrollee.build_m5())  # verify first half
+        self.assertTrue(reg.first_half_ok)
+        reg.build_m6()
+        reg.process_m7(enrollee.build_m7(network_key=b'CorrectHorseBattery',
+                                         ssid=b'TestNet'))
+
+        cred = reg.credential()
+        self.assertEqual(cred['psk'], 'CorrectHorseBattery')
+        self.assertEqual(cred['ssid'], 'TestNet')
+
+    def test_wrong_pin_fails_first_half(self):
+        enrollee = _MirrorEnrollee(pin='12345670')
+        reg = wps.WpsRegistrar(registrar_mac=b'\x00\x11\x22\x33\x44\x55', pin='00000000')
+        reg.process_m1(enrollee.build_m1())
+        enrollee.recv_m2(reg.build_m2(), reg.pkr)
+        reg.process_m3(enrollee.build_m3(reg.pke, reg.pkr))
+        reg.build_m4()
+        with self.assertRaises(wps.WpsProtocolError):
+            reg.process_m5(enrollee.build_m5())
+
+
+class TestAes(unittest.TestCase):
+    def test_fips197_vector(self):
+        key = bytes.fromhex('000102030405060708090a0b0c0d0e0f')
+        pt = bytes.fromhex('00112233445566778899aabbccddeeff')
+        ct = bytes.fromhex('69c4e0d86a7b0430d8cdb78070b4c55a')
+        self.assertEqual(wc.aes128_cbc_encrypt(key, b'\x00' * 16, pt), ct)
+        self.assertEqual(wc.aes128_cbc_decrypt(key, b'\x00' * 16, ct), pt)
 
 
 if __name__ == '__main__':

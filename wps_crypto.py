@@ -127,3 +127,117 @@ def authenticator(authkey, prev_msg, cur_msg):
 def kwa(authkey, key_wrap_data):
     """Key Wrap Authenticator = HMAC-SHA256_AuthKey(data)[:8]."""
     return hmac.new(authkey, key_wrap_data, hashlib.sha256).digest()[:8]
+
+
+# --------------------------------------------------------------------------
+# AES-128 (vendored, pure Python) — for WPS Encrypted Settings (Phase 2)
+# --------------------------------------------------------------------------
+_SBOX = bytes.fromhex(
+    '637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0'
+    'b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275'
+    '09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf'
+    'd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2'
+    'cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb'
+    'e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08'
+    'ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e'
+    'e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16')
+_INV_SBOX = bytearray(256)
+for _i, _v in enumerate(_SBOX):
+    _INV_SBOX[_v] = _i
+_RCON = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
+
+
+def _xtime(a):
+    a <<= 1
+    if a & 0x100:
+        a ^= 0x11b
+    return a & 0xFF
+
+
+def _mul(a, b):
+    res = 0
+    for _ in range(8):
+        if b & 1:
+            res ^= a
+        b >>= 1
+        a = _xtime(a)
+    return res
+
+
+def _key_expansion(key):
+    rk = [list(key[i:i + 4]) for i in range(0, 16, 4)]
+    for i in range(4, 44):
+        t = list(rk[i - 1])
+        if i % 4 == 0:
+            t = t[1:] + t[:1]
+            t = [_SBOX[x] for x in t]
+            t[0] ^= _RCON[i // 4 - 1]
+        rk.append([rk[i - 4][j] ^ t[j] for j in range(4)])
+    return rk
+
+
+def _add_round_key(s, rk):
+    for c in range(4):
+        for r in range(4):
+            s[r][c] ^= rk[c][r]
+
+
+def _aes_encrypt_block(block, rk):
+    s = [[block[r + 4 * c] for c in range(4)] for r in range(4)]
+    _add_round_key(s, rk[0:4])
+    for rnd in range(1, 10):
+        s = [[_SBOX[s[r][c]] for c in range(4)] for r in range(4)]
+        s = [s[r][r:] + s[r][:r] for r in range(4)]
+        s = [[_mul(2, s[0][c]) ^ _mul(3, s[1][c]) ^ s[2][c] ^ s[3][c],
+              s[0][c] ^ _mul(2, s[1][c]) ^ _mul(3, s[2][c]) ^ s[3][c],
+              s[0][c] ^ s[1][c] ^ _mul(2, s[2][c]) ^ _mul(3, s[3][c]),
+              _mul(3, s[0][c]) ^ s[1][c] ^ s[2][c] ^ _mul(2, s[3][c])]
+             for c in range(4)]
+        s = [[s[c][r] for c in range(4)] for r in range(4)]
+        _add_round_key(s, rk[rnd * 4:rnd * 4 + 4])
+    s = [[_SBOX[s[r][c]] for c in range(4)] for r in range(4)]
+    s = [s[r][r:] + s[r][:r] for r in range(4)]
+    _add_round_key(s, rk[40:44])
+    return bytes(s[r][c] for c in range(4) for r in range(4))
+
+
+def _aes_decrypt_block(block, rk):
+    s = [[block[r + 4 * c] for c in range(4)] for r in range(4)]
+    _add_round_key(s, rk[40:44])
+    for rnd in range(9, 0, -1):
+        s = [s[r][-r:] + s[r][:-r] if r else s[r] for r in range(4)]
+        s = [[_INV_SBOX[s[r][c]] for c in range(4)] for r in range(4)]
+        _add_round_key(s, rk[rnd * 4:rnd * 4 + 4])
+        s = [[_mul(14, s[0][c]) ^ _mul(11, s[1][c]) ^ _mul(13, s[2][c]) ^ _mul(9, s[3][c]),
+              _mul(9, s[0][c]) ^ _mul(14, s[1][c]) ^ _mul(11, s[2][c]) ^ _mul(13, s[3][c]),
+              _mul(13, s[0][c]) ^ _mul(9, s[1][c]) ^ _mul(14, s[2][c]) ^ _mul(11, s[3][c]),
+              _mul(11, s[0][c]) ^ _mul(13, s[1][c]) ^ _mul(9, s[2][c]) ^ _mul(14, s[3][c])]
+             for c in range(4)]
+        s = [[s[c][r] for c in range(4)] for r in range(4)]
+    s = [s[r][-r:] + s[r][:-r] if r else s[r] for r in range(4)]
+    s = [[_INV_SBOX[s[r][c]] for c in range(4)] for r in range(4)]
+    _add_round_key(s, rk[0:4])
+    return bytes(s[r][c] for c in range(4) for r in range(4))
+
+
+def aes128_cbc_encrypt(key, iv, data):
+    rk = _key_expansion(key)
+    out = bytearray()
+    prev = iv
+    for i in range(0, len(data), 16):
+        block = bytes(a ^ b for a, b in zip(data[i:i + 16], prev))
+        prev = _aes_encrypt_block(block, rk)
+        out += prev
+    return bytes(out)
+
+
+def aes128_cbc_decrypt(key, iv, data):
+    rk = _key_expansion(key)
+    out = bytearray()
+    prev = iv
+    for i in range(0, len(data), 16):
+        block = data[i:i + 16]
+        dec = _aes_decrypt_block(block, rk)
+        out += bytes(a ^ b for a, b in zip(dec, prev))
+        prev = block
+    return bytes(out)

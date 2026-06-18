@@ -39,7 +39,10 @@ ATTR_DEV_NAME = 0x1011
 ATTR_DEV_PASSWORD_ID = 0x1012
 ATTR_E_HASH1 = 0x1014
 ATTR_E_HASH2 = 0x1015
+ATTR_E_SNONCE1 = 0x1016
+ATTR_E_SNONCE2 = 0x1017
 ATTR_ENCR_SETTINGS = 0x1018
+ATTR_SSID = 0x1045
 ATTR_ENROLLEE_NONCE = 0x101a
 ATTR_KEY_WRAP_AUTH = 0x101e
 ATTR_MAC_ADDR = 0x1020
@@ -141,6 +144,37 @@ def _version_attrs():
     return attr_u8(ATTR_VERSION, WPS_VERSION) + attr(ATTR_VENDOR_EXT, v2)
 
 
+def build_encrypted_settings(keywrapkey, authkey, inner_attrs):
+    """Wrap WSC attributes as ATTR_ENCR_SETTINGS value (IV || AES-128-CBC)."""
+    kwa_attr = attr(ATTR_KEY_WRAP_AUTH, wc.kwa(authkey, inner_attrs))
+    plaintext = inner_attrs + kwa_attr
+    pad = 16 - (len(plaintext) % 16)               # PKCS#7
+    plaintext += bytes([pad]) * pad
+    iv = os.urandom(16)
+    return iv + wc.aes128_cbc_encrypt(keywrapkey, iv, plaintext)
+
+
+def parse_encrypted_settings(keywrapkey, authkey, blob):
+    """Decrypt ATTR_ENCR_SETTINGS, verify the KWA, return {attr: value}."""
+    if len(blob) < 32 or len(blob) % 16:
+        raise WpsProtocolError('bad Encrypted Settings length')
+    iv, ct = blob[:16], blob[16:]
+    plaintext = wc.aes128_cbc_decrypt(keywrapkey, iv, ct)
+    pad = plaintext[-1]
+    if pad < 1 or pad > 16 or pad > len(plaintext):
+        raise WpsProtocolError('bad padding (wrong key/PIN?)')
+    plaintext = plaintext[:-pad]
+    marker = struct.pack('>HH', ATTR_KEY_WRAP_AUTH, 8)
+    pos = plaintext.rfind(marker)
+    if pos < 0:
+        raise WpsProtocolError('missing Key Wrap Authenticator')
+    inner = plaintext[:pos]
+    got = plaintext[pos + 4:pos + 12]
+    if wc.kwa(authkey, inner) != got:
+        raise WpsProtocolError('Key Wrap Authenticator mismatch (wrong PIN/key)')
+    return attrs_dict(inner)
+
+
 # --------------------------------------------------------------------------
 # EAP / EAPOL framing
 # --------------------------------------------------------------------------
@@ -226,14 +260,22 @@ class WpsRegistrar:
         self.dh_priv, self.pkr = wc.dh_keypair()     # our (registrar) DH keys
         self.nonce_r = os.urandom(NONCE_LEN)
         self.uuid_r = os.urandom(16)
+        self.rs1 = os.urandom(NONCE_LEN)             # registrar secret nonces
+        self.rs2 = os.urandom(NONCE_LEN)
 
         # filled from M1
         self.pke = None
         self.nonce_e = None
         self.enrollee_mac = None
         self.authkey = self.keywrapkey = self.emsk = None
+        self.psk1 = self.psk2 = None
         # filled from M3
         self.e_hash1 = self.e_hash2 = None
+        # filled from M7 (full PIN path)
+        self.network_key = None
+        self.found_ssid = None
+        self.first_half_ok = False
+        self.finished = False
         # last message we sent / received (for the running Authenticator)
         self._last_recv = None
         self._last_sent = None
@@ -248,6 +290,8 @@ class WpsRegistrar:
         self.enrollee_mac = a[ATTR_MAC_ADDR]
         self.authkey, self.keywrapkey, self.emsk = derive_keys(
             self.pke, self.dh_priv, self.nonce_e, self.enrollee_mac, self.nonce_r)
+        if self.pin is not None:
+            self.psk1, self.psk2 = wc.derive_psk(self.authkey, str(self.pin))
         self._last_recv = msg
 
     # -- M2 (sent to the AP/enrollee) --
@@ -286,6 +330,63 @@ class WpsRegistrar:
         self.e_hash1 = a[ATTR_E_HASH1]
         self.e_hash2 = a[ATTR_E_HASH2]
         self._last_recv = msg
+
+    # -- M4 (sent): R-Hash1/2 + Encrypted Settings{R-S1} (full PIN path) --
+    def build_m4(self):
+        if self.psk1 is None:
+            raise WpsProtocolError('M4 requires a PIN')
+        r_hash1 = wc.wps_hash(self.authkey, self.rs1, self.psk1, self.pke, self.pkr)
+        r_hash2 = wc.wps_hash(self.authkey, self.rs2, self.psk2, self.pke, self.pkr)
+        encr = build_encrypted_settings(self.keywrapkey, self.authkey,
+                                        attr(ATTR_R_SNONCE1, self.rs1))
+        body = (_version_attrs() + attr_u8(ATTR_MSG_TYPE, WPS_M4)
+                + attr(ATTR_R_HASH1, r_hash1) + attr(ATTR_R_HASH2, r_hash2)
+                + attr(ATTR_ENCR_SETTINGS, encr))
+        auth = authenticator(self.authkey, self._last_recv, body)
+        msg = body + attr(ATTR_AUTHENTICATOR, auth)
+        self._last_sent = msg
+        return msg
+
+    # -- M5 (received): Encrypted Settings{E-S1}; confirms first PIN half --
+    def process_m5(self, msg):
+        a = attrs_dict(msg)
+        settings = parse_encrypted_settings(self.keywrapkey, self.authkey,
+                                            a[ATTR_ENCR_SETTINGS])
+        es1 = settings[ATTR_E_SNONCE1]
+        expect = wc.wps_hash(self.authkey, es1, self.psk1, self.pke, self.pkr)
+        self.first_half_ok = (expect == self.e_hash1)
+        if not self.first_half_ok:
+            raise WpsProtocolError('first half of PIN is incorrect')
+        self._last_recv = msg
+
+    # -- M6 (sent): Encrypted Settings{R-S2} --
+    def build_m6(self):
+        encr = build_encrypted_settings(self.keywrapkey, self.authkey,
+                                        attr(ATTR_R_SNONCE2, self.rs2))
+        body = (_version_attrs() + attr_u8(ATTR_MSG_TYPE, WPS_M6)
+                + attr(ATTR_ENCR_SETTINGS, encr))
+        auth = authenticator(self.authkey, self._last_recv, body)
+        msg = body + attr(ATTR_AUTHENTICATOR, auth)
+        self._last_sent = msg
+        return msg
+
+    # -- M7 (received): the AP's Encrypted Settings carrying its credential --
+    def process_m7(self, msg):
+        a = attrs_dict(msg)
+        settings = parse_encrypted_settings(self.keywrapkey, self.authkey,
+                                            a[ATTR_ENCR_SETTINGS])
+        if ATTR_NETWORK_KEY in settings:
+            self.network_key = settings[ATTR_NETWORK_KEY].decode('utf-8', 'replace')
+        if ATTR_SSID in settings:
+            self.found_ssid = settings[ATTR_SSID].decode('utf-8', 'replace')
+        self.finished = True
+        self._last_recv = msg
+
+    def credential(self):
+        """The recovered AP credential, or None (full PIN path)."""
+        if self.network_key is None:
+            return None
+        return {'ssid': self.found_ssid, 'psk': self.network_key}
 
     def pixie_data(self):
         """The six values pixiewps needs, as uppercase hex (or None)."""
@@ -424,7 +525,16 @@ class WpsConnection:
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m2()))
                 elif mtype == bytes([WPS_M3]):
                     reg.process_m3(msg)
-                    eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                    if stop_after_m3:
+                        eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        break
+                    eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m4()))
+                elif mtype == bytes([WPS_M5]):
+                    reg.process_m5(msg)
+                    eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m6()))
+                elif mtype == bytes([WPS_M7]):
+                    reg.process_m7(msg)
+                    eapol.send(eap_wsc_response(info['id'], WSC_Done, b''))
                     break
             return reg
         finally:
@@ -436,3 +546,9 @@ class WpsConnection:
         reg = WpsRegistrar(self._own_mac())
         self._drive(reg, stop_after_m3=True)
         return reg.pixie_data()
+
+    def run(self, pin):
+        """Full PIN path: run M1..M7 and return the recovered AP credential or None."""
+        reg = WpsRegistrar(self._own_mac(), pin=str(pin))
+        self._drive(reg, stop_after_m3=False)
+        return reg.credential()
