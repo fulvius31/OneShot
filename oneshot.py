@@ -121,6 +121,8 @@ class WPSpin:
                       # Static pin algos
                       'pinGeneric': {'name': 'Static', 'mode': self.ALGO_STATIC_DB, 'gen': lambda mac: 1234567, 'static': []},
                       'pinEmpty': {'name': 'Empty PIN', 'mode': self.ALGO_EMPTY, 'gen': lambda mac: ''}}
+        # Lazily-loaded (prefix, pin) pairs from pins.csv; loaded once on first use.
+        self._pin_db = None
 
     @staticmethod
     def checksum(pin):
@@ -193,12 +195,27 @@ class WPSpin:
         else:
             return None
 
-    def append_from_pin_csv(self, pin_file_path, mac):
-        with open(pin_file_path, newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if  mac.startswith(row[1]):
-                    self.algos['pinGeneric']['static'].append(row[0])
+    @staticmethod
+    def _load_pin_db():
+        """Read pins.csv once into a list of (mac_prefix, pin) pairs."""
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'pins.csv')
+        db = []
+        try:
+            with open(path, newline='') as csvfile:
+                for row in csv.reader(csvfile):
+                    if len(row) >= 2 and row[1]:
+                        db.append((row[1], row[0]))
+        except FileNotFoundError:
+            pass
+        return db
+
+    def append_from_pin_csv(self, mac):
+        if self._pin_db is None:
+            self._pin_db = self._load_pin_db()
+        mac = mac.upper()
+        for prefix, pin in self._pin_db:
+            if mac.startswith(prefix):
+                self.algos['pinGeneric']['static'].append(pin)
 
     def _suggest(self, mac):
         """
@@ -207,12 +224,8 @@ class WPSpin:
         The static pins will be added only if they are included in the csv for that specific mac
         Returns the algo ID
         """
-        self.append_from_pin_csv(os.path.join(os.path.dirname(os.path.realpath(__file__)), 'pins.csv'), mac.upper())
-        res = []
-        for algo_id in self.algos:
-            res.append(algo_id)
-
-        return res
+        self.append_from_pin_csv(mac)
+        return list(self.algos)
 
     def pinTrendNet(self, bssid):
         try:
@@ -884,6 +897,8 @@ class WiFiScanner:
     def __init__(self, interface, vuln_list=None):
         self.interface = interface
         self.vuln_list = vuln_list
+        # Load pins.csv MAC prefixes once instead of re-reading per network.
+        self.vuln_prefixes = WPSpin._load_pin_db()
 
         reports_fname = os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv'
         try:
@@ -902,12 +917,8 @@ class WiFiScanner:
         except FileNotFoundError:
             self.stored = []
 
-    def checkvuln_from_pin_csv(self, pin_file_path, mac):
-        with open(pin_file_path, newline='') as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if  mac.startswith(row[1]):
-                    return True
+    def is_vuln_from_pin_db(self, mac):
+        return any(mac.startswith(prefix) for prefix, _ in self.vuln_prefixes)
 
     def iw_scanner(self) -> Dict[int, dict]:
         """Parsing iw scan results"""
@@ -1071,8 +1082,7 @@ class WiFiScanner:
             elif network['WPS locked']:
                 print(colored(line, color='red'))
             elif ((self.vuln_list and (model in self.vuln_list))
-                  or self.checkvuln_from_pin_csv(os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                                                              'pins.csv'), network['BSSID'])):
+                  or self.is_vuln_from_pin_db(network['BSSID'])):
                 print(colored(line, color='green'))
             else:
                 print(line)
