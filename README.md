@@ -9,11 +9,12 @@
  - a broad set of offline WPS PIN algorithms: 24/28/32/36/40/44/48-bit, D-Link(+1), ASUS, Airocon, EasyBox, Arris, TrendNet, FTE, plus serial-based Belkin and Orange (see `--serial`);
  - built-in **pure-Python nl80211 (netlink) Wi-Fi scanner** — talks to the kernel directly, so the `iw` binary is no longer required (handy on Android/Termux), with automatic fallback to `iw`;
  - optional built-in **pure-Python WPS engine** (`--engine native`) — associates via nl80211 and runs the EAP-WSC exchange itself (no `wpa_supplicant`, no monitor mode); supports Pixie-Dust and full PIN→PSK recovery;
+ - built-in **pure-Python Pixie-Dust cracker** for the common modes (Ralink/MediaTek LFSR + trivial nonce cases) — `pixiewps` is only needed for the rarer eCos/RTL-glibc and `--pixie-force` brute;
  - Wi-Fi scanner with vulnerability highlighting.
 # Requirements
  - Python 3.6 and above (standard library only — no `pip` packages needed);
- - [Wpa supplicant](https://www.w1.fi/wpa_supplicant/);
- - [Pixiewps](https://github.com/wiire-a/pixiewps);
+ - [Wpa supplicant](https://www.w1.fi/wpa_supplicant/) — needed only for the default WPS engine; not used with `--engine native`;
+ - [Pixiewps](https://github.com/wiire-a/pixiewps) — **optional**: the built-in cracker handles the common Ralink/MediaTek + trivial cases; pixiewps is only needed for eCos/RTL-glibc targets and `--pixie-force`;
  - [iw](https://wireless.wiki.kernel.org/en/users/documentation/iw) — **optional**, only used as a fallback scanner (`--scanner iw`); the default built-in nl80211 scanner needs no external binary.
 
 > **Note:** the built-in nl80211 scanner lives in `nl80211_scan.py`. Use `git clone` (below) to get it alongside `oneshot.py`; a single-file `wget` of `oneshot.py` still works but will only scan via `iw`.

