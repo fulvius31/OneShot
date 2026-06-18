@@ -86,15 +86,18 @@ Optional: getting a list of vulnerable to pixie dust devices for highlighting in
 ## [Termux](https://termux.com/)
 Please note that root access is required.  
 
+OneShot ships its own nl80211 scanner and native WPS engine, so on Termux you
+no longer need `wpa_supplicant` or `iw` — only `pixiewps` (for the offline crack).
+
 #### Using installer
  ```
- curl -sSf https://raw.githubusercontent.com/fulvius31/OneShot_Termux_installer/master/installer.sh | bash
+ curl -sSf https://raw.githubusercontent.com/fulvius31/OneShot/master/termux_install.sh | bash
  ```
 #### Manually
 **Installing requirements**
  ```
  pkg install -y root-repo
- pkg install -y git tsu python wpa-supplicant pixiewps iw openssl
+ pkg install -y git tsu python pixiewps
  ```
 **Getting OneShot**
  ```
@@ -102,8 +105,10 @@ Please note that root access is required.
  ```
 #### Running
  ```
- sudo python OneShot/oneshot.py -i wlan0 --iface-down -K
+ sudo python OneShot/oneshot.py -i wlan0 --iface-down -K --engine native --scanner nl80211
  ```
+> The native engine is driver-dependent. If it doesn't work on your adapter,
+> `pkg install wpa-supplicant iw` and drop the `--engine`/`--scanner` flags.
 
 # Usage
 ```
