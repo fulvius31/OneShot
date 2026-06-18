@@ -16,6 +16,7 @@ import statistics
 from pathlib import Path
 from typing import Dict
 import csv
+from functools import lru_cache
 
 
 class NetworkAddress:
@@ -55,15 +56,20 @@ class NetworkAddress:
 
     def __iadd__(self, other):
         self.integer += other
+        return self
 
     def __isub__(self, other):
         self.integer -= other
+        return self
 
     def __eq__(self, other):
         return self.integer == other.integer
 
     def __ne__(self, other):
         return self.integer != other.integer
+
+    def __hash__(self):
+        return hash(self.integer)
 
     def __lt__(self, other):
         return self.integer < other.integer
@@ -73,7 +79,7 @@ class NetworkAddress:
 
     @staticmethod
     def _mac2int(mac):
-        return int(mac.replace(':', ''), 16)
+        return int(mac.replace(':', '').replace('-', '').replace('.', ''), 16)
 
     @staticmethod
     def _int2mac(mac):
@@ -85,6 +91,14 @@ class NetworkAddress:
     def __repr__(self):
         return 'NetworkAddress(string={}, integer={})'.format(
             self._str_repr, self._int_repr)
+
+
+@lru_cache(maxsize=None)
+def _arris_fib(n):
+    """Fibonacci-like sequence used by the Arris PIN algorithm (cached)."""
+    if n in (0, 1, 2):
+        return 1
+    return _arris_fib(n - 1) + _arris_fib(n - 2)
 
 
 class WPSpin:
@@ -238,17 +252,9 @@ class WPSpin:
             return f"{hpinint:07d}{self.checksum(hpinint)}"
 
         except ValueError:
-            return 12345670
+            return "12345670"
 
     def pinArris(self, bssid):
-        def fib_gen(n, memo={}):
-            if n in memo:
-                return memo[n]
-            if n in (0, 1, 2):
-                return 1
-            memo[n] = fib_gen(n - 1, memo) + fib_gen(n - 2, memo)
-            return memo[n]
-
         macs = bssid.string.split(":")
         array_macs = [int(mac, 16) for mac in macs]
 
@@ -267,9 +273,9 @@ class WPSpin:
                 adjusted_mac &= 0xff
                 adjusted_mac = (adjusted_mac % 28) + 3
 
-            fibnum.append(fib_gen(adjusted_mac) + (fib_gen(counter) if counter else 0))
+            fibnum.append(_arris_fib(adjusted_mac) + (_arris_fib(counter) if counter else 0))
 
-        fibsum = sum(fib * fib_gen(i + 16) for i, fib in enumerate(fibnum)) + sum(array_macs)
+        fibsum = sum(fib * _arris_fib(i + 16) for i, fib in enumerate(fibnum)) + sum(array_macs)
         fibsum = (fibsum % 10000000 * 10) + self.checksum(fibsum)
 
         return f"{fibsum:08d}"
