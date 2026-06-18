@@ -462,8 +462,12 @@ class Companion:
         print('[*] Running wpa_supplicant…')
         cmd = ['wpa_supplicant', '-K', '-d', '-Dnl80211,wext,hostapd,wired',
                '-i', self.interface, '-c', self.tempconf]
-        self.wpas = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        try:
+            self.wpas = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        except FileNotFoundError:
+            raise ValueError("Command 'wpa_supplicant' not found — install it "
+                             "(Termux: pkg install wpa-supplicant; Debian: apt install wpasupplicant)")
         # Waiting for wpa_supplicant control interface initialization
         while True:
             ret = self.wpas.poll()
@@ -614,8 +618,12 @@ class Companion:
         cmd = self.pixie_creds.get_pixie_cmd(full_range)
         if showcmd:
             print(' '.join(cmd))
-        r = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
-                           stderr=sys.stdout, encoding='utf-8', errors='replace')
+        try:
+            r = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
+                               stderr=sys.stdout, encoding='utf-8', errors='replace')
+        except FileNotFoundError:
+            print("[!] Command 'pixiewps' not found — install it (Termux: pkg install pixiewps)")
+            return False
         print(r.stdout)
         if r.returncode == 0:
             lines = r.stdout.splitlines()
@@ -993,8 +1001,12 @@ class WiFiScanner:
                                            .encode('latin1').decode('utf-8', errors='replace'))
 
         cmd = ['iw', 'dev', self.interface, 'scan']
-        proc = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        try:
+            proc = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
+        except FileNotFoundError:
+            print("[!] Command 'iw' not found — install it (Termux: pkg install iw)")
+            return False
         lines = proc.stdout.splitlines()
         networks = []
         matchers = {
@@ -1125,11 +1137,12 @@ def ifaceUp(iface, down=False):
     else:
         action = 'up'
     cmd = ['ip', 'link', 'set', iface, action]
-    res = subprocess.run(cmd, shell=False, stdout=sys.stdout, stderr=sys.stdout)
-    if res.returncode == 0:
-        return True
-    else:
+    try:
+        res = subprocess.run(cmd, shell=False, stdout=sys.stdout, stderr=sys.stdout)
+    except FileNotFoundError:
+        sys.stderr.write("[!] Command 'ip' not found — install iproute2 (Termux: pkg install iproute2)\n")
         return False
+    return res.returncode == 0
 
 
 def die(msg):
