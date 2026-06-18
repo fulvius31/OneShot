@@ -360,12 +360,15 @@ class PixiewpsData:
                 and self.e_hash1 and self.e_hash2)
 
     def get_pixie_cmd(self, full_range=False):
-        pixiecmd = "pixiewps --pke {} --pkr {} --e-hash1 {}"\
-                    " --e-hash2 {} --authkey {} --e-nonce {}".format(
-                    self.pke, self.pkr, self.e_hash1,
-                    self.e_hash2, self.authkey, self.e_nonce)
+        pixiecmd = ['pixiewps',
+                    '--pke', self.pke,
+                    '--pkr', self.pkr,
+                    '--e-hash1', self.e_hash1,
+                    '--e-hash2', self.e_hash2,
+                    '--authkey', self.authkey,
+                    '--e-nonce', self.e_nonce]
         if full_range:
-            pixiecmd += ' --force'
+            pixiecmd.append('--force')
         return pixiecmd
 
 
@@ -434,7 +437,7 @@ class Companion:
         self.wpas_ctrl_path = f"{self.tempdir}/{interface}"
         self.__init_wpa_supplicant()
 
-        self.res_socket_file = f"{tempfile._get_default_tempdir()}/{next(tempfile._get_candidate_names())}"
+        self.res_socket_file = os.path.join(self.tempdir, 'retsock')
         self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.retsock.bind(self.res_socket_file)
 
@@ -454,8 +457,9 @@ class Companion:
 
     def __init_wpa_supplicant(self):
         print('[*] Running wpa_supplicant…')
-        cmd = 'wpa_supplicant -K -d -Dnl80211,wext,hostapd,wired -i{} -c{}'.format(self.interface, self.tempconf)
-        self.wpas = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+        cmd = ['wpa_supplicant', '-K', '-d', '-Dnl80211,wext,hostapd,wired',
+               '-i', self.interface, '-c', self.tempconf]
+        self.wpas = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         # Waiting for wpa_supplicant control interface initialization
         while True:
@@ -485,6 +489,24 @@ class Companion:
                         'Please build wpa_supplicant with WPS support ("CONFIG_WPS=y")')
         return '[!] Something went wrong — check out debug log'
 
+    def _capture_hex(self, line, attr, expected_len, label, pixiemode, verbose):
+        """Parse a wpa_supplicant hexdump line, validate its length, and store it.
+
+        Replaces bare ``assert`` checks: malformed values are skipped (so the
+        Pixie Dust attack reports 'not enough data') instead of crashing or
+        being silently disabled under ``python -O``.
+        """
+        value = get_hex(line)
+        if len(value) != expected_len:
+            if verbose:
+                sys.stderr.write(
+                    '[!] Ignoring malformed {} hexdump (got {} hex chars, expected {})\n'.format(
+                        label, len(value), expected_len))
+            return
+        setattr(self.pixie_creds, attr, value)
+        if pixiemode:
+            print('[P] {}: {}'.format(label, value))
+
     def __handle_wpas(self, pixiemode=False, pbc_mode=False, verbose=None):
         if not verbose:
             verbose = self.print_debug
@@ -509,38 +531,23 @@ class Companion:
                 if n == 5:
                     print('[+] The first half of the PIN is valid')
             elif 'Enrollee Nonce' in line and 'hexdump' in line:
-                self.pixie_creds.e_nonce = get_hex(line)
-                assert(len(self.pixie_creds.e_nonce) == 16*2)
-                if pixiemode:
-                    print('[P] E-Nonce: {}'.format(self.pixie_creds.e_nonce))
+                self._capture_hex(line, 'e_nonce', 16 * 2, 'E-Nonce', pixiemode, verbose)
             elif 'DH own Public Key' in line and 'hexdump' in line:
-                self.pixie_creds.pkr = get_hex(line)
-                assert(len(self.pixie_creds.pkr) == 192*2)
-                if pixiemode:
-                    print('[P] PKR: {}'.format(self.pixie_creds.pkr))
+                self._capture_hex(line, 'pkr', 192 * 2, 'PKR', pixiemode, verbose)
             elif 'DH peer Public Key' in line and 'hexdump' in line:
-                self.pixie_creds.pke = get_hex(line)
-                assert(len(self.pixie_creds.pke) == 192*2)
-                if pixiemode:
-                    print('[P] PKE: {}'.format(self.pixie_creds.pke))
+                self._capture_hex(line, 'pke', 192 * 2, 'PKE', pixiemode, verbose)
             elif 'AuthKey' in line and 'hexdump' in line:
-                self.pixie_creds.authkey = get_hex(line)
-                assert(len(self.pixie_creds.authkey) == 32*2)
-                if pixiemode:
-                    print('[P] AuthKey: {}'.format(self.pixie_creds.authkey))
+                self._capture_hex(line, 'authkey', 32 * 2, 'AuthKey', pixiemode, verbose)
             elif 'E-Hash1' in line and 'hexdump' in line:
-                self.pixie_creds.e_hash1 = get_hex(line)
-                assert(len(self.pixie_creds.e_hash1) == 32*2)
-                if pixiemode:
-                    print('[P] E-Hash1: {}'.format(self.pixie_creds.e_hash1))
+                self._capture_hex(line, 'e_hash1', 32 * 2, 'E-Hash1', pixiemode, verbose)
             elif 'E-Hash2' in line and 'hexdump' in line:
-                self.pixie_creds.e_hash2 = get_hex(line)
-                assert(len(self.pixie_creds.e_hash2) == 32*2)
-                if pixiemode:
-                    print('[P] E-Hash2: {}'.format(self.pixie_creds.e_hash2))
+                self._capture_hex(line, 'e_hash2', 32 * 2, 'E-Hash2', pixiemode, verbose)
             elif 'Network Key' in line and 'hexdump' in line:
                 self.connection_status.status = 'GOT_PSK'
-                self.connection_status.wpa_psk = bytes.fromhex(get_hex(line)).decode('utf-8', errors='replace')
+                try:
+                    self.connection_status.wpa_psk = bytes.fromhex(get_hex(line)).decode('utf-8', errors='replace')
+                except ValueError:
+                    self.connection_status.wpa_psk = ''
         elif ': State: ' in line:
             if '-> SCANNING' in line:
                 self.connection_status.status = 'scanning'
@@ -603,8 +610,8 @@ class Companion:
         print("[*] Running Pixiewps…")
         cmd = self.pixie_creds.get_pixie_cmd(full_range)
         if showcmd:
-            print(cmd)
-        r = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
+            print(' '.join(cmd))
+        r = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
                            stderr=sys.stdout, encoding='utf-8', errors='replace')
         print(r.stdout)
         if r.returncode == 0:
@@ -968,8 +975,8 @@ class WiFiScanner:
             networks[-1]['Device name'] = (codecs.decode(d, 'unicode-escape')
                                            .encode('latin1').decode('utf-8', errors='replace'))
 
-        cmd = 'iw dev {} scan'.format(self.interface)
-        proc = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE,
+        cmd = ['iw', 'dev', self.interface, 'scan']
+        proc = subprocess.run(cmd, shell=False, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         lines = proc.stdout.splitlines()
         networks = []
@@ -1098,8 +1105,8 @@ def ifaceUp(iface, down=False):
         action = 'down'
     else:
         action = 'up'
-    cmd = 'ip link set {} {}'.format(iface, action)
-    res = subprocess.run(cmd, shell=True, stdout=sys.stdout, stderr=sys.stdout)
+    cmd = ['ip', 'link', 'set', iface, action]
+    res = subprocess.run(cmd, shell=False, stdout=sys.stdout, stderr=sys.stdout)
     if res.returncode == 0:
         return True
     else:
