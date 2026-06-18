@@ -119,7 +119,8 @@ class WPSpin:
                       'pinArris': {'name': 'Arris', 'mode': self.ALGO_MAC, 'gen': self.pinArris},
                       'pinTrendNet': {'name': 'TrendNet', 'mode': self.ALGO_MAC, 'gen': self.pinTrendNet},
                       # Static pin algos
-                      'pinGeneric': {'name': 'Static', 'mode': self.ALGO_STATIC_DB, 'gen': lambda mac: 1234567, 'static': []},
+                      'pinGeneric': {'name': 'Static', 'mode': self.ALGO_STATIC_DB,
+                                     'gen': lambda mac: 1234567, 'static': []},
                       'pinEmpty': {'name': 'Empty PIN', 'mode': self.ALGO_EMPTY, 'gen': lambda mac: ''}}
         # Lazily-loaded (prefix, pin) pairs from pins.csv; loaded once on first use.
         self._pin_db = None
@@ -340,17 +341,6 @@ class WPSpin:
         return pin
 
 
-def recvuntil(pipe, what):
-    s = ''
-    while True:
-        inp = pipe.stdout.read(1)
-        if inp == '':
-            return s
-        s += inp
-        if what in s:
-            return s
-
-
 def get_hex(line):
     a = line.split(':', 3)
     return a[2].replace(' ', '').upper()
@@ -460,7 +450,7 @@ class Companion:
         user_home = str(pathlib.Path.home())
         self.sessions_dir = f'{user_home}/.OneShot/sessions/'
         self.pixiewps_dir = f'{user_home}/.OneShot/pixiewps/'
-        self.reports_dir = os.path.dirname(os.path.realpath(__file__)) + '/reports/'
+        self.reports_dir = f'{user_home}/.OneShot/reports/'
         if not os.path.exists(self.sessions_dir):
             os.makedirs(self.sessions_dir)
         if not os.path.exists(self.pixiewps_dir):
@@ -683,7 +673,7 @@ class Companion:
                         pin = pins[int(pinNo) - 1]['pin']
                     else:
                         raise IndexError
-                except Exception:
+                except (ValueError, IndexError):
                     print('Invalid number')
                 else:
                     break
@@ -882,11 +872,26 @@ class Companion:
                 raise KeyboardInterrupt
 
     def cleanup(self):
-        self.retsock.close()
-        self.wpas.terminate()
-        os.remove(self.res_socket_file)
-        shutil.rmtree(self.tempdir, ignore_errors=True)
-        os.remove(self.tempconf)
+        # Idempotent and safe to call on a partially-constructed object
+        # (e.g. if __init__ aborted before all attributes were set).
+        if getattr(self, '_cleaned_up', False):
+            return
+        self._cleaned_up = True
+        retsock = getattr(self, 'retsock', None)
+        if retsock is not None:
+            retsock.close()
+        wpas = getattr(self, 'wpas', None)
+        if wpas is not None:
+            wpas.terminate()
+        for path in (getattr(self, 'res_socket_file', None), getattr(self, 'tempconf', None)):
+            if path:
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+        tempdir = getattr(self, 'tempdir', None)
+        if tempdir:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
     def __del__(self):
         self.cleanup()
@@ -894,13 +899,14 @@ class Companion:
 
 class WiFiScanner:
     """docstring for WiFiScanner"""
-    def __init__(self, interface, vuln_list=None):
+    def __init__(self, interface, vuln_list=None, reverse_scan=False):
         self.interface = interface
         self.vuln_list = vuln_list
+        self.reverse_scan = reverse_scan
         # Load pins.csv MAC prefixes once instead of re-reading per network.
         self.vuln_prefixes = WPSpin._load_pin_db()
 
-        reports_fname = os.path.dirname(os.path.realpath(__file__)) + '/reports/stored.csv'
+        reports_fname = str(pathlib.Path.home()) + '/.OneShot/reports/stored.csv'
         try:
             with open(reports_fname, 'r', newline='', encoding='utf-8', errors='replace') as file:
                 csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
@@ -1065,7 +1071,7 @@ class WiFiScanner:
             '#', 'BSSID', 'ESSID', 'Sec.', 'PWR', 'WSC device name', 'WSC model'))
 
         network_list_items = list(network_list.items())
-        if args.reverse_scan:
+        if self.reverse_scan:
             network_list_items = network_list_items[::-1]
         for n, network in network_list_items:
             number = f'{n})'
@@ -1090,24 +1096,27 @@ class WiFiScanner:
         return network_list
 
     def prompt_network(self) -> tuple:
-        networks = self.iw_scanner()
-        if not networks:
-            print('[-] No WPS networks found.')
-            return
-        while 1:
-            try:
-                networkNo = input('Select target (press Enter to refresh): ')
-                if networkNo.lower() in ('r', '0', ''):
-                    return self.prompt_network()
-                elif int(networkNo) in networks.keys():
-                    if networks[int(networkNo)]['ESSID'] is None:
-                        return networks[int(networkNo)]['BSSID']
+        while True:
+            networks = self.iw_scanner()
+            if not networks:
+                print('[-] No WPS networks found.')
+                return
+            refresh = False
+            while not refresh:
+                try:
+                    networkNo = input('Select target (press Enter to refresh): ')
+                    if networkNo.lower() in ('r', '0', ''):
+                        refresh = True   # re-scan in the outer loop
+                    elif int(networkNo) in networks.keys():
+                        net = networks[int(networkNo)]
+                        essid = net.get('ESSID')
+                        if essid is None:
+                            return (net['BSSID'],)
+                        return net['BSSID'], essid
                     else:
-                        return networks[int(networkNo)]['BSSID'], networks[int(networkNo)]['ESSID']
-                else:
-                    raise IndexError
-            except Exception:
-                print('Invalid number')
+                        raise IndexError
+                except (ValueError, IndexError):
+                    print('Invalid number')
 
 
 def ifaceUp(iface, down=False):
@@ -1126,41 +1135,6 @@ def ifaceUp(iface, down=False):
 def die(msg):
     sys.stderr.write(msg + '\n')
     sys.exit(1)
-
-
-def usage():
-    return """
-OneShotPin 0.0.2 (c) 2017 rofl0r, drygdryg and fulvius31
-
-%(prog)s <arguments>
-
-Required arguments:
-    -i, --interface=<wlan0>  : Name of the interface to use
-
-Optional arguments:
-    -b, --bssid=<mac>        : BSSID of the target AP
-    -s, --ssid=<ssid>        : SSID of the target AP
-    -p, --pin=<wps pin>      : Use the specified pin (arbitrary string or 4/8 digit pin)
-    -K, --pixie-dust         : Run Pixie Dust attack
-    -B, --bruteforce         : Run online bruteforce attack
-    --push-button-connect    : Run WPS push button connection
-
-Advanced arguments:
-    -d, --delay=<n>          : Set the delay between pin attempts [0]
-    -w, --write              : Write AP credentials to the file on success
-    -F, --pixie-force        : Run Pixiewps with --force option (bruteforce full range)
-    -X, --show-pixie-cmd     : Always print Pixiewps command
-    --vuln-list=<filename>   : Use custom file with vulnerable devices list ['vulnwsc.txt']
-    --iface-down             : Down network interface when the work is finished
-    -l, --loop               : Run in a loop
-    -r, --reverse-scan       : Reverse order of networks in the list of networks. Useful on small displays
-    --mtk-wifi               : Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
-                               (for internal Wi-Fi adapters implemented in MediaTek SoCs). Turn off Wi-Fi in the system settings before using this.
-    -v, --verbose            : Verbose output
-
-Example:
-    %(prog)s -i wlan0 -b 00:90:4C:C1:AC:21 -K
-"""
 
 
 if __name__ == '__main__':
@@ -1281,8 +1255,8 @@ if __name__ == '__main__':
 
     while True:
         try:
-            companion = Companion(args.interface, args.write, print_debug=args.verbose)
             if args.pbc:
+                companion = Companion(args.interface, args.write, print_debug=args.verbose)
                 companion.single_connection(pbc_mode=True)
             else:
                 if not args.bssid:
@@ -1291,7 +1265,7 @@ if __name__ == '__main__':
                             vuln_list = file.read().splitlines()
                     except FileNotFoundError:
                         vuln_list = []
-                    scanner = WiFiScanner(args.interface, vuln_list)
+                    scanner = WiFiScanner(args.interface, vuln_list, reverse_scan=args.reverse_scan)
                     if not args.loop:
                         print('[*] BSSID not specified (--bssid) — scanning for available networks')
 
@@ -1302,10 +1276,10 @@ if __name__ == '__main__':
                 if args.bssid:
                     companion = Companion(args.interface, args.write, print_debug=args.verbose)
                     if args.bruteforce:
-                        companion.smart_bruteforce(args.bssid, args.pin, args.delay)
+                        companion.smart_bruteforce(args.bssid, args.pin, args.delay, loop=args.loop)
                     else:
                         companion.single_connection(bssid=args.bssid, ssid=args.ssid, pin=args.pin,
-                                                    pixiemode=args.pixie_dust,showpixiecmd=args.show_pixie_cmd,
+                                                    pixiemode=args.pixie_dust, showpixiecmd=args.show_pixie_cmd,
                                                     pixieforce=args.pixie_force)
             if not args.loop:
                 break
