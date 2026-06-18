@@ -18,6 +18,11 @@ from typing import Dict
 import csv
 from functools import lru_cache
 
+try:
+    import nl80211_scan
+except ImportError:
+    nl80211_scan = None
+
 
 class NetworkAddress:
     def __init__(self, mac):
@@ -907,10 +912,12 @@ class Companion:
 
 class WiFiScanner:
     """docstring for WiFiScanner"""
-    def __init__(self, interface, vuln_list=None, reverse_scan=False):
+    def __init__(self, interface, vuln_list=None, reverse_scan=False, scanner='auto'):
         self.interface = interface
         self.vuln_list = vuln_list
         self.reverse_scan = reverse_scan
+        # Scan backend: 'auto' (nl80211, fall back to iw), 'nl80211', or 'iw'.
+        self.scanner = scanner
         # Load pins.csv MAC prefixes once instead of re-reading per network.
         self.vuln_prefixes = WPSpin._load_pin_db()
 
@@ -934,8 +941,8 @@ class WiFiScanner:
     def is_vuln_from_pin_db(self, mac):
         return any(mac.startswith(prefix) for prefix, _ in self.vuln_prefixes)
 
-    def iw_scanner(self) -> Dict[int, dict]:
-        """Parsing iw scan results"""
+    def _scan_with_iw(self):
+        """Run ``iw dev <iface> scan`` and parse its text output into a list."""
         def handle_network(line, result, networks):
             networks.append(
                     {
@@ -1006,7 +1013,7 @@ class WiFiScanner:
                                   stderr=subprocess.STDOUT, encoding='utf-8', errors='replace')
         except FileNotFoundError:
             print("[!] Command 'iw' not found — install it (Termux: pkg install iw)")
-            return False
+            return []
         lines = proc.stdout.splitlines()
         networks = []
         matchers = {
@@ -1026,12 +1033,31 @@ class WiFiScanner:
         for line in lines:
             if line.startswith('command failed:'):
                 print('[!] Error:', line)
-                return False
+                return []
             line = line.strip('\t')
             for regexp, handler in matchers.items():
                 res = re.match(regexp, line)
                 if res:
                     handler(line, res, networks)
+        return networks
+
+    def _collect_networks(self):
+        """Get raw networks via the configured backend (nl80211, then iw)."""
+        if self.scanner in ('auto', 'nl80211') and nl80211_scan is not None:
+            try:
+                return nl80211_scan.scan(self.interface)
+            except nl80211_scan.Nl80211Error as e:
+                if self.scanner == 'nl80211':
+                    print('[!] nl80211 scan failed: {}'.format(e))
+                    return []
+                print('[!] nl80211 scan failed ({}); falling back to iw'.format(e))
+        elif self.scanner == 'nl80211':
+            print('[!] nl80211 backend unavailable; falling back to iw')
+        return self._scan_with_iw()
+
+    def scan_networks(self) -> Dict[int, dict]:
+        """Scan, keep WPS networks, print a table, return {index: network}."""
+        networks = self._collect_networks()
 
         # Filtering non-WPS networks
         networks = list(filter(lambda x: bool(x['WPS']), networks))
@@ -1039,7 +1065,7 @@ class WiFiScanner:
             return False
 
         # Sorting by signal level
-        networks.sort(key=lambda x: x['Level'], reverse=True)
+        networks.sort(key=lambda x: x.get('Level', 0), reverse=True)
 
         # Putting a list of networks in a dictionary, where each key is a network number in list of networks
         network_list = {(i + 1): network for i, network in enumerate(networks)}
@@ -1092,7 +1118,7 @@ class WiFiScanner:
             deviceName = truncateStr(network['Device name'], 27)
             line = '{:<4} {:<18} {:<25} {:<8} {:<4} {:<27} {:<}'.format(
                 number, network['BSSID'], essid,
-                network['Security type'], network['Level'],
+                network['Security type'], network.get('Level', 0),
                 deviceName, model
                 )
             if (network['BSSID'],  network.get('ESSID', '')) in self.stored:
@@ -1109,7 +1135,7 @@ class WiFiScanner:
 
     def prompt_network(self) -> tuple:
         while True:
-            networks = self.iw_scanner()
+            networks = self.scan_networks()
             if not networks:
                 print('[-] No WPS networks found.')
                 return
@@ -1236,6 +1262,14 @@ if __name__ == '__main__':
         help='Reverse order of networks in the list of networks. Useful on small displays'
         )
     parser.add_argument(
+        '--scanner',
+        type=str,
+        choices=['auto', 'nl80211', 'iw'],
+        default='auto',
+        help="Wi-Fi scan backend: 'auto' (built-in nl80211, fall back to iw), "
+             "'nl80211' (built-in netlink, no iw binary), or 'iw' (legacy)"
+        )
+    parser.add_argument(
         '--mtk-wifi',
         action='store_true',
         help='Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit '
@@ -1278,7 +1312,8 @@ if __name__ == '__main__':
                             vuln_list = file.read().splitlines()
                     except FileNotFoundError:
                         vuln_list = []
-                    scanner = WiFiScanner(args.interface, vuln_list, reverse_scan=args.reverse_scan)
+                    scanner = WiFiScanner(args.interface, vuln_list,
+                                          reverse_scan=args.reverse_scan, scanner=args.scanner)
                     if not args.loop:
                         print('[*] BSSID not specified (--bssid) — scanning for available networks')
 

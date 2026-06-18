@@ -158,17 +158,44 @@ class TestIwScannerParsing(unittest.TestCase):
     ])
 
     def test_parses_only_wps_networks(self):
-        scanner = WiFiScanner('wlan0', [])
+        scanner = WiFiScanner('wlan0', [], scanner='iw')
         fake_proc = mock.Mock(stdout=self.SAMPLE, returncode=0)
         with mock.patch.object(oneshot.subprocess, 'run', return_value=fake_proc):
             with contextlib.redirect_stdout(io.StringIO()):
-                networks = scanner.iw_scanner()
+                networks = scanner.scan_networks()
         self.assertEqual(len(networks), 1)
         net = networks[1]
         self.assertEqual(net['BSSID'], 'AA:BB:CC:DD:EE:FF')
         self.assertEqual(net['ESSID'], 'TestNet')
         self.assertTrue(net['WPS'])
         self.assertEqual(net['Level'], -42)
+
+
+@unittest.skipUnless(oneshot.nl80211_scan is not None, 'nl80211_scan not importable')
+class TestScannerBackendSelection(unittest.TestCase):
+    FAKE_NET = [{'BSSID': 'AA:BB:CC:DD:EE:01', 'ESSID': 'NlNet', 'Level': -30,
+                 'Security type': 'WPA2', 'WPS': '1.0', 'WPS locked': False,
+                 'Model': '', 'Model number': '', 'Device name': ''}]
+
+    def test_nl80211_backend_used(self):
+        scanner = WiFiScanner('wlan0', [], scanner='nl80211')
+        with mock.patch.object(oneshot.nl80211_scan, 'scan', return_value=self.FAKE_NET):
+            with contextlib.redirect_stdout(io.StringIO()):
+                networks = scanner.scan_networks()
+        self.assertEqual(networks[1]['ESSID'], 'NlNet')
+
+    def test_auto_falls_back_to_iw(self):
+        scanner = WiFiScanner('wlan0', [], scanner='auto')
+        fake_proc = mock.Mock(stdout=TestIwScannerParsing.SAMPLE, returncode=0)
+
+        def boom(iface):
+            raise oneshot.nl80211_scan.Nl80211Error('no device')
+
+        with mock.patch.object(oneshot.nl80211_scan, 'scan', side_effect=boom):
+            with mock.patch.object(oneshot.subprocess, 'run', return_value=fake_proc):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    networks = scanner.scan_networks()
+        self.assertEqual(networks[1]['BSSID'], 'AA:BB:CC:DD:EE:FF')
 
 
 class TestPinDbCache(unittest.TestCase):
