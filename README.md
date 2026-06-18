@@ -1,115 +1,44 @@
 [![tests](https://github.com/fulvius31/OneShot/actions/workflows/tests.yml/badge.svg)](https://github.com/fulvius31/OneShot/actions/workflows/tests.yml)
 
 # Overview
-**OneShot** performs [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack) without having to switch to monitor mode.
+**OneShot** performs the [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack) and online WPS PIN attacks **without monitor mode** — and is now **fully self-contained pure Python**: no `wpa_supplicant`, no `iw`, no `pixiewps`, no `pip` packages. Just Python 3.6+ and root.
+
 # Features
- - [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack);
- - integrated [3WiFi offline WPS PIN generator](https://3wifi.stascorp.com/wpspin);
- - [online WPS bruteforce](https://sviehb.files.wordpress.com/2011/12/viehboeck_wps.pdf);
+ - **Pixie Dust attack** with a built-in pure-Python cracker (Ralink/MediaTek LFSR inversion + trivial nonce cases);
+ - **online WPS PIN bruteforce** (half-by-half);
+ - full WPS **PIN → PSK** recovery;
  - a broad set of offline WPS PIN algorithms: 24/28/32/36/40/44/48-bit, D-Link(+1), ASUS, Airocon, EasyBox, Arris, TrendNet, FTE, plus serial-based Belkin and Orange (see `--serial`);
- - built-in **pure-Python nl80211 (netlink) Wi-Fi scanner** — talks to the kernel directly, so the `iw` binary is no longer required (handy on Android/Termux), with automatic fallback to `iw`;
- - optional built-in **pure-Python WPS engine** (`--engine native`) — associates via nl80211 and runs the EAP-WSC exchange itself (no `wpa_supplicant`, no monitor mode); supports Pixie-Dust and full PIN→PSK recovery;
- - built-in **pure-Python Pixie-Dust cracker** for the common modes (Ralink/MediaTek LFSR + trivial nonce cases) — `pixiewps` is only needed for the rarer eCos/RTL-glibc and `--pixie-force` brute;
- - Wi-Fi scanner with vulnerability highlighting.
+ - built-in **nl80211 (netlink) Wi-Fi scanner** with vulnerability highlighting;
+ - built-in **WPS engine** — associates via nl80211 (managed mode, no monitor mode) and runs the EAP-WSC exchange itself over a raw EAPOL socket.
+
+Everything talks to the kernel directly (nl80211 + `AF_PACKET`), so no external Wi-Fi tooling is needed.
+
 # Requirements
- - Python 3.6 and above (standard library only — no `pip` packages needed);
- - [Wpa supplicant](https://www.w1.fi/wpa_supplicant/) — needed only for the default WPS engine; not used with `--engine native`;
- - [Pixiewps](https://github.com/wiire-a/pixiewps) — **optional**: the built-in cracker handles the common Ralink/MediaTek + trivial cases; pixiewps is only needed for eCos/RTL-glibc targets and `--pixie-force`;
- - [iw](https://wireless.wiki.kernel.org/en/users/documentation/iw) — **optional**, only used as a fallback scanner (`--scanner iw`); the default built-in nl80211 scanner needs no external binary.
+ - Python 3.6 and above — **standard library only**;
+ - **root** (the scanner, association and EAPOL need `CAP_NET_ADMIN`/`CAP_NET_RAW`).
 
-> **Note:** the built-in nl80211 scanner lives in `nl80211_scan.py`. Use `git clone` (below) to get it alongside `oneshot.py`; a single-file `wget` of `oneshot.py` still works but will only scan via `iw`.
+> ⚠️ **Experimental.** The crypto and WPS protocol layers are unit-tested, but the live nl80211-association + EAPOL transport is driver-dependent and should be validated on your hardware. It needs a free interface — stop NetworkManager / the system `wpa_supplicant` first (or use `--iface-down`).
+
 # Setup
-## Debian/Ubuntu
-**Installing requirements**
- ```
- sudo apt install -y python3 wpasupplicant iw wget
- ```
-**Installing Pixiewps**
+OneShot is two files — `oneshot.py` plus its helper modules (`nl80211_scan.py`, `wps_connect.py`, `wps_crypto.py`, `pixie.py`) — so clone the repo rather than fetching a single script.
 
-***Ubuntu 18.04 and above or Debian 10 and above***
+## Debian/Ubuntu/Arch
  ```
- sudo apt install -y pixiewps
+ sudo apt install -y python3 git        # Debian/Ubuntu
+ sudo pacman -S python git              # Arch
+ git clone --depth 1 https://github.com/fulvius31/OneShot
  ```
- 
-***Other versions***
- ```
- sudo apt install -y build-essential unzip
- wget https://github.com/wiire-a/pixiewps/archive/master.zip && unzip master.zip
- cd pixiewps*/
- make
- sudo make install
- ```
-**Getting OneShot**
- ```
- cd ~
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/oneshot.py
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/nl80211_scan.py
- ```
-Optional: getting a list of vulnerable to pixie dust devices for highlighting in scan results:
- ```
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/vulnwsc.txt
- ```
-## Arch Linux
-**Installing requirements**
- ```
- sudo pacman -S wpa_supplicant pixiewps wget python
- ```
-**Getting OneShot**
- ```
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/oneshot.py
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/nl80211_scan.py
- ```
-Optional: getting a list of vulnerable to pixie dust devices for highlighting in scan results:
- ```
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/vulnwsc.txt
- ```
-## Alpine Linux
-It can also be used to run on Android devices using [Linux Deploy](https://play.google.com/store/apps/details?id=ru.meefik.linuxdeploy)
 
-**Installing requirements**  
-Adding the testing repository:
- ```
- sudo sh -c 'echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing/" >> /etc/apk/repositories'
- ```
- ```
- sudo apk add python3 wpa_supplicant pixiewps iw
- ```
- **Getting OneShot**
- ```
- sudo wget https://raw.githubusercontent.com/fulvius31/OneShot/master/oneshot.py
- sudo wget https://raw.githubusercontent.com/fulvius31/OneShot/master/nl80211_scan.py
- wget https://raw.githubusercontent.com/fulvius31/OneShot/master/nl80211_scan.py
- ```
-Optional: getting a list of vulnerable to pixie dust devices for highlighting in scan results:
- ```
- sudo wget https://raw.githubusercontent.com/fulvius31/OneShot/master/vulnwsc.txt
- ```
-## [Termux](https://termux.com/)
-Please note that root access is required.  
-
-OneShot ships its own nl80211 scanner and native WPS engine, so on Termux you
-no longer need `wpa_supplicant` or `iw` — only `pixiewps` (for the offline crack).
-
+## [Termux](https://termux.com/) (rooted Android)
 #### Using installer
  ```
  curl -sSf https://raw.githubusercontent.com/fulvius31/OneShot/master/termux_install.sh | bash
  ```
 #### Manually
-**Installing requirements**
  ```
- pkg install -y root-repo
- pkg install -y git tsu python pixiewps
+ pkg install -y git tsu python
+ git clone --depth 1 https://github.com/fulvius31/OneShot
  ```
-**Getting OneShot**
- ```
- git clone --depth 1 https://github.com/fulvius31/OneShot OneShot
- ```
-#### Running
- ```
- sudo python OneShot/oneshot.py -i wlan0 --iface-down -K --engine native --scanner nl80211
- ```
-> The native engine is driver-dependent. If it doesn't work on your adapter,
-> `pkg install wpa-supplicant iw` and drop the `--engine`/`--scanner` flags.
 
 # Usage
 ```
@@ -119,91 +48,65 @@ no longer need `wpa_supplicant` or `iw` — only `pixiewps` (for the offline cra
 
  Optional arguments:
      -b, --bssid=<mac>        : BSSID of the target AP
+     -s, --ssid=<ssid>        : SSID of the target AP
      -p, --pin=<wps pin>      : Use the specified pin (arbitrary string or 4/8 digit pin)
      -K, --pixie-dust         : Run Pixie Dust attack
      -B, --bruteforce         : Run online bruteforce attack
-     --push-button-connect    : Run WPS push button connection
+     --serial=<serial>        : Device serial number — enables the Belkin and Orange PIN algorithms
 
  Advanced arguments:
-     -d, --delay=<n>          : Set the delay between pin attempts [0]
+     -d, --delay=<n>          : Set the delay between pin attempts
      -w, --write              : Write AP credentials to the file on success
-     -F, --pixie-force        : Run Pixiewps with --force option (bruteforce full range)
-     -X, --show-pixie-cmd     : Always print Pixiewps command
-     --vuln-list=<filename>   : Use custom file with vulnerable devices list ['vulnwsc.txt']
      --iface-down             : Down network interface when the work is finished
      -l, --loop               : Run in a loop
-     -r, --reverse-scan       : Reverse order of networks in the list of networks. Useful on small displays
-     --scanner={auto|nl80211|iw} : Wi-Fi scan backend [auto]. 'auto' uses the built-in
-                                nl80211 netlink scanner and falls back to 'iw'; 'nl80211'
-                                forces the built-in scanner (no iw binary); 'iw' uses iw.
-     --serial=<serial>        : Device serial number — enables the Belkin and Orange PIN algorithms
-     --engine={wpa_supplicant|native} : WPS engine [wpa_supplicant]. 'native' is the
-                                built-in pure-Python nl80211+EAPOL engine (no wpa_supplicant,
-                                no monitor mode; root only). Use with -K (Pixie-Dust) or -p (PIN).
+     -r, --reverse-scan       : Reverse order of networks in the list. Useful on small displays
+     --vuln-list=<filename>   : Use custom file with vulnerable devices list ['vulnwsc.txt']
      --mtk-wifi               : Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
                                 (for internal Wi-Fi adapters implemented in MediaTek SoCs). Turn off Wi-Fi in the system settings before using this.
      -v, --verbose            : Verbose output
  ```
 
 ## Usage examples
-Start Pixie Dust attack on a specified BSSID:
+Pixie Dust attack on a specified BSSID:
  ```
  sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -K
  ```
-Show avaliable networks and start Pixie Dust attack on a specified network:
+Scan, pick a network, then Pixie Dust:
  ```
  sudo python3 oneshot.py -i wlan0 -K
  ```
-Launch online WPS bruteforce with the specified first half of the PIN:
+Online WPS bruteforce:
  ```
- sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -B -p 1234
+ sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -B
  ```
- Start WPS push button connection:
+Try a specific PIN and recover the PSK:
  ```
- sudo python3 oneshot.py -i wlan0 --pbc
+ sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -p 12345670
  ```
-Scan without the `iw` binary (force the built-in nl80211 scanner):
- ```
- sudo python3 oneshot.py -i wlan0 -K --scanner nl80211
- ```
-Run Pixie-Dust with the built-in WPS engine (no `wpa_supplicant`):
- ```
- sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -K --engine native
- ```
-
-> **`--engine native` is experimental.** The crypto and protocol layers are
-> unit-tested, but the live nl80211 association + EAPOL path is driver-dependent
-> and must be validated on real hardware. It needs root, a free `wlan0` (stop
-> NetworkManager / the system `wpa_supplicant` first, e.g. `--iface-down`), and
-> `pixiewps` for the `-K` crack. If it fails on your adapter, use the default
-> `wpa_supplicant` engine.
 
 ## Where results are stored
 OneShot keeps its data under `~/.OneShot/` (of the user it runs as — i.e. `root` when run with `sudo`):
  - `~/.OneShot/reports/` — recovered credentials (`stored.txt`, `stored.csv`), written with `-w`/`--write`;
  - `~/.OneShot/sessions/` — resumable online-bruteforce sessions;
- - `~/.OneShot/pixiewps/` — PINs calculated by Pixiewps.
+ - `~/.OneShot/pixiewps/` — recovered PINs.
 
 ## Development
-This project uses only the Python standard library. Run the test suite with:
+Standard library only. Run the test suite (no Wi-Fi hardware or root required):
  ```
  python3 -m unittest discover -s tests
  ```
-The tests cover the PIN-generation algorithms, the `wpa_supplicant`/`iw` parsers, and the
-nl80211 attribute/IE/WPS decoders — no Wi-Fi hardware or root required. They run on every push via
-[GitHub Actions](.github/workflows/tests.yml).
+The tests cover the PIN-generation algorithms, the WPS crypto (DH/KDF/AES vs FIPS-197), the EAP-WSC message layer (validated against a mirror enrollee through M7), the nl80211 attribute/IE/WPS decoders, and the Pixie-Dust cracker. They run on every push via [GitHub Actions](.github/workflows/tests.yml).
 
 ## Troubleshooting
 #### "RTNETLINK answers: Operation not possible due to RF-kill"
- Just run:
-```sudo rfkill unblock wifi```
-#### "Device or resource busy (-16)"
- Try disabling Wi-Fi in the system settings and kill the Network manager. Alternatively, you can try running OneShot with ```--iface-down``` argument.
+ Just run: ```sudo rfkill unblock wifi```
+#### "Device or resource busy (-16)" / association fails
+ Another supplicant owns the interface. Disable Wi-Fi in the system settings and kill NetworkManager / `wpa_supplicant`, or run with ```--iface-down```.
 #### The wlan0 interface disappears when Wi-Fi is disabled on Android devices with MediaTek SoC
- Try running OneShot with the `--mtk-wifi` flag to initialize Wi-Fi device driver.
+ Run with the `--mtk-wifi` flag to initialize the Wi-Fi device driver.
+
 # Acknowledgements
 ## Special Thanks
-* `rofl0r` for initial implementation;
+* `rofl0r` for the initial implementation;
 * `Monohrom` for testing, help in catching bugs, some ideas;
-* `Wiire` for developing Pixiewps;
-* `drydryg` for his amazing work on `rofl0r` repo.
+* `Wiire` for `pixiewps` and `drygdryg` for the `rofl0r` repo work — the references this pure-Python reimplementation follows.

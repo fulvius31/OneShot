@@ -2,9 +2,10 @@
 #
 # OneShot — Termux installer (root required).
 #
-# OneShot ships its own pure-Python Wi-Fi scanner (nl80211) and WPS engine
-# (--engine native), so this installer does NOT pull in wpa_supplicant or iw.
-# The only external binary still used is pixiewps (the offline Pixie-Dust crack).
+# OneShot is fully self-contained pure Python: it ships its own nl80211 scanner,
+# WPS engine and Pixie-Dust cracker, so this installer pulls in NO external
+# Wi-Fi tooling (no wpa_supplicant, no iw, no pixiewps) — only Python + a root
+# shell helper.
 #
 # Run directly:
 #   curl -sSf https://raw.githubusercontent.com/fulvius31/OneShot/master/termux_install.sh | bash
@@ -14,11 +15,8 @@ set -e
 echo "[*] Updating package lists…"
 pkg update -y
 
-echo "[*] Enabling root-repo (provides pixiewps)…"
-pkg install -y root-repo
-
-echo "[*] Installing dependencies (no wpa_supplicant, no iw)…"
-pkg install -y git tsu python pixiewps
+echo "[*] Installing dependencies (Python + root shell only)…"
+pkg install -y git tsu python
 
 echo "[*] Fetching OneShot…"
 if [ -d OneShot/.git ]; then
@@ -31,12 +29,10 @@ cat <<'EOF'
 
 [+] Done.
 
-Run a Pixie-Dust attack using the built-in engine (no wpa_supplicant / iw):
+Run a Pixie-Dust attack (everything is built in — no external binaries):
 
-    sudo python OneShot/oneshot.py -i wlan0 --iface-down -K \
-         --engine native --scanner nl80211
+    sudo python OneShot/oneshot.py -i wlan0 --iface-down -K
 
-The native engine is driver-dependent; if it does not work on your adapter,
-install wpa_supplicant + iw (pkg install wpa-supplicant iw) and drop the
---engine/--scanner flags to use the classic path.
+The built-in WPS engine is driver-dependent. If association fails, make sure no
+other supplicant owns wlan0 (stop the system Wi-Fi / NetworkManager first).
 EOF
