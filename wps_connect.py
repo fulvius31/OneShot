@@ -475,13 +475,16 @@ class EapolPort:
 class EapolSocket:
     """Fallback EAPOL transport over AF_PACKET (drivers without control-port-over-nl80211).
 
-    Bound to ETH_P_ALL, NOT ETH_P_PAE. A packet socket bound to a *specific*
-    protocol silently drops the AP's EAPOL while the station is associated but
-    the 802.1X port is still unauthorized — exactly the WPS case. This is the
-    documented Linux packet-socket regression that hostap's l2_packet works
-    around with an ETH_P_ALL socket + ethertype filter (l2_packet_linux.c). We
-    bind ETH_P_ALL and match the 0x888E ethertype in Python (recvfrom returns
-    the ethertype in the address tuple), which is the same fix without a BPF.
+    Bound to ETH_P_ALL and filtered to 0x888E in Python. hostap's normal
+    station path binds ETH_P_PAE directly and that works; ETH_P_ALL is a strict
+    superset of what an ETH_P_PAE bind delivers (it also catches the
+    unauthorized-port case hostap only handles via its bridge workaround), so
+    binding ETH_P_ALL maximises RX coverage with no downside. recvfrom returns
+    the ethertype in the address tuple, so we drop non-EAPOL frames cheaply.
+
+    NOTE: the decisive fix for "associated but no EAPOL" was not the bind
+    protocol but opening this socket BEFORE association (see _drive) — the AP
+    sends EAP-Request/Identity right after assoc and it is lost if we bind late.
     """
 
     def __init__(self, interface, peer_mac, timeout=8):
@@ -531,7 +534,7 @@ NL80211_ATTR_SSID = 52
 NL80211_ATTR_AUTH_TYPE = 53
 NL80211_ATTR_IE = 42
 NL80211_ATTR_WIPHY_FREQ = 38
-NL80211_ATTR_STATUS_CODE = 48
+NL80211_ATTR_STATUS_CODE = 72            # was wrongly 48 (=KEY_TYPE); masked real CONNECT status
 NL80211_ATTR_CONTROL_PORT = 68            # was wrongly 84
 NL80211_ATTR_CONTROL_PORT_ETHERTYPE = 102
 NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT = 103
@@ -730,14 +733,26 @@ class WpsConnection:
         """
         self._log('Associating with {}…'.format(self.bssid))
         peer = _mac_bytes(self.bssid)
-        sock, family_id, ifindex, over_nl80211 = associate(
-            self.interface, peer, self.ssid.encode(), verbose=self.verbose)
+        # Open the AF_PACKET EAPOL socket BEFORE associating. The AP drives the
+        # exchange: it sends EAP-Request/Identity immediately after association
+        # (a supplicant only sends EAPOL-Start as a fallback — hostap
+        # eapol_supp_sm.c). wpa_supplicant's RX socket is always open before the
+        # association completes; if we bind only afterwards, that first frame is
+        # already gone. Pre-binding here is what makes EAPOL actually arrive.
+        eapol_pkt = EapolSocket(self.interface, peer, self.timeout)
+        try:
+            sock, family_id, ifindex, over_nl80211 = associate(
+                self.interface, peer, self.ssid.encode(), verbose=self.verbose)
+        except Exception:
+            eapol_pkt.close()
+            raise
         if over_nl80211:
             self._log('EAPOL over nl80211 control port')
+            eapol_pkt.close()
             eapol = EapolPort(sock, family_id, ifindex, peer, self.timeout)
         else:
             self._log('EAPOL over AF_PACKET')
-            eapol = EapolSocket(self.interface, peer, self.timeout)
+            eapol = eapol_pkt
         try:
             eapol.send(eapol_start())
             self._log('→ EAPOL-Start')
