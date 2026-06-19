@@ -634,7 +634,8 @@ class Companion:
         """Best-effort: read the AP's WPS Serial Number from M1 (often a placeholder)."""
         try:
             import wps_connect
-            serial = wps_connect.WpsConnection(self.interface, bssid, ssid or '').probe_serial()
+            conn = wps_connect.WpsConnection(self.interface, bssid, ssid or '', verbose=self.print_debug)
+            serial = conn.probe_serial()
         except Exception:
             return None
         if serial:
@@ -701,7 +702,7 @@ class Companion:
             return
         print('[*] Native engine: associating and running WPS exchange to M3…')
         try:
-            data = wps_connect.WpsConnection(self.interface, bssid, ssid or '').pixie_dust()
+            data = wps_connect.WpsConnection(self.interface, bssid, ssid or '', verbose=self.print_debug).pixie_dust()
         except Exception as e:
             print('[!] Native WPS exchange failed: {}'.format(e))
             return
@@ -727,7 +728,7 @@ class Companion:
             return False
         print('[*] Native engine: running full WPS exchange (M1..M7) to recover the PSK…')
         try:
-            cred = wps_connect.WpsConnection(self.interface, bssid, ssid or '').run(pin)
+            cred = wps_connect.WpsConnection(self.interface, bssid, ssid or '', verbose=self.print_debug).run(pin)
         except Exception as e:
             print('[!] Native WPS connection failed: {}'.format(e))
             return False
@@ -786,7 +787,7 @@ class Companion:
         except ImportError:
             print('[!] Native engine unavailable (wps_connect.py missing)')
             return
-        conn = wps_connect.WpsConnection(self.interface, bssid, ssid or '')
+        conn = wps_connect.WpsConnection(self.interface, bssid, ssid or '', verbose=self.print_debug)
 
         session = self.sessions_dir + '{}.run'.format(bssid.replace(':', '').upper())
         if start_pin and len(start_pin) >= 4:
