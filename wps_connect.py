@@ -558,16 +558,19 @@ def _wlog(verbose, msg):
         print('[WPS] ' + msg)
 
 
-def _lookup_freq(interface, bssid):
-    """Find the AP's frequency from a scan (also warms the kernel scan cache)."""
+def _lookup_bss(interface, bssid):
+    """Find the AP's frequency and SSID from a scan (also warms the kernel cache).
+
+    Returns (freq, ssid_str); either may be 0/'' if the AP wasn't seen.
+    """
     import nl80211_scan as nl
     try:
         for net in nl.scan(interface):
-            if net.get('BSSID') == bssid and net.get('Frequency'):
-                return net['Frequency']
+            if net.get('BSSID') == bssid:
+                return net.get('Frequency') or 0, net.get('ESSID') or ''
     except Exception:
         pass
-    return 0
+    return 0, ''
 
 
 def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
@@ -582,9 +585,21 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
     import nl80211_scan as nl
     ifindex = socket.if_nametoindex(interface)
     bssid_str = ':'.join('%02X' % b for b in bssid_bytes)
-    if not freq:
-        freq = _lookup_freq(interface, bssid_str)   # also populates the scan cache
-        _wlog(verbose, 'scan: AP {} on {} MHz'.format(bssid_str, freq or 'unknown'))
+    # NL80211_CMD_CONNECT needs the SSID (a BSSID-only connect is rejected with
+    # status 1 by most drivers). When the caller didn't pass one (e.g. -b without
+    # -s), resolve it — and the frequency — from a scan, like wpa_supplicant does.
+    if not freq or not ssid_bytes:
+        scan_freq, scan_ssid = _lookup_bss(interface, bssid_str)
+        if not freq:
+            freq = scan_freq
+        if not ssid_bytes and scan_ssid:
+            ssid_bytes = scan_ssid.encode()
+        _wlog(verbose, 'scan: AP {} on {} MHz, ssid={!r}'.format(
+            bssid_str, freq or 'unknown', ssid_bytes.decode('utf-8', 'replace')))
+    if not ssid_bytes:
+        raise nl.Nl80211Error(
+            'could not resolve the SSID for {} from a scan — pass it explicitly '
+            'with -s <SSID> (a hidden AP will not appear by BSSID alone)'.format(bssid_str))
     sock = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, nl.NETLINK_GENERIC)
     sock.bind((0, 0))
     sock.settimeout(8)
