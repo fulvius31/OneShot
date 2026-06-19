@@ -622,6 +622,21 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
                 sock.setsockopt(nl.SOL_NETLINK, nl.NETLINK_ADD_MEMBERSHIP, grp)
             except OSError:
                 pass
+        # Drop any existing association first. On Android the system framework
+        # keeps wlan0 connected to a network; a FullMAC chip cannot associate to
+        # our target (often on a different channel) while that connection is
+        # live, so the CONNECT comes back rejected (status 1). Disconnecting
+        # frees the interface. Ignore errors — there may be nothing to drop, or
+        # the framework may own it (then the user must disconnect Wi-Fi himself).
+        try:
+            nl._send(sock, nl._genl_msg(
+                family_id, NL80211_CMD_DISCONNECT, 9, nl.NLM_F_REQUEST | nl.NLM_F_ACK,
+                nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))))
+            for _ in nl._read_until_done(sock):
+                pass
+        except (nl.Nl80211Error, OSError):
+            pass
+        time.sleep(0.5)   # let the disconnect settle before associating
         attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
                  + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
                  + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
@@ -670,7 +685,12 @@ def _await_connect_result(sock, family_id, verbose=False):
                 sc = cattrs.get(NL80211_ATTR_STATUS_CODE)
                 status = struct.unpack('=H', sc[:2])[0] if sc and len(sc) >= 2 else 0
                 if status != 0:
-                    raise nl.Nl80211Error('association rejected (status {})'.format(status))
+                    raise nl.Nl80211Error(
+                        'association rejected (status {}). Most likely the interface is '
+                        'still connected to / managed by the system Wi-Fi: disconnect from '
+                        'the current network in Android settings (keep the Wi-Fi radio ON so '
+                        'the interface stays up), then retry. A live connection on another '
+                        'channel blocks associating to the target.'.format(status))
                 return
             i += _align_msg(mlen)
 
