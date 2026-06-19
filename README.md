@@ -1,7 +1,7 @@
 [![tests](https://github.com/fulvius31/OneShot/actions/workflows/tests.yml/badge.svg)](https://github.com/fulvius31/OneShot/actions/workflows/tests.yml)
 
 # Overview
-**OneShot** performs the [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack) and online WPS PIN attacks **without monitor mode** — and is now **fully self-contained pure Python**: no `wpa_supplicant`, no `iw`, no `pixiewps`, no `pip` packages. Just Python 3.6+ and root.
+**OneShot** performs the [Pixie Dust attack](https://forums.kali.org/showthread.php?24286-WPS-Pixie-Dust-Attack-Offline-WPS-Attack) and online WPS PIN attacks **without monitor mode**. Its default engine is **self-contained pure Python** — its own nl80211 scanner, WPS engine and Pixie-Dust cracker, no `iw`/`pixiewps`/`pip` packages. For internal **FullMAC** chips that refuse a raw nl80211 association (notably Broadcom on Android), it can instead **drive a real `wpa_supplicant`** — see [Engines](#engines).
 
 # Features
  - **Pixie Dust attack** with a built-in pure-Python cracker (Ralink/MediaTek LFSR inversion + trivial nonce cases);
@@ -11,7 +11,15 @@
  - built-in **nl80211 (netlink) Wi-Fi scanner** with vulnerability highlighting;
  - built-in **WPS engine** — associates via nl80211 (managed mode, no monitor mode) and runs the EAP-WSC exchange itself over a raw EAPOL socket.
 
-Everything talks to the kernel directly (nl80211 + `AF_PACKET`), so no external Wi-Fi tooling is needed.
+# Engines
+OneShot has two WPS backends; the offline scanner and Pixie-Dust cracker are shared (always pure Python):
+
+| Engine | Flag | Use it for |
+| --- | --- | --- |
+| **Native** (default) | *(none)* | softMAC (`mac80211`) drivers and external USB adapters. Talks to the kernel directly over nl80211 + `AF_PACKET`; no external Wi-Fi tooling. |
+| **wpa_supplicant** | `--wpa-supplicant` | Internal **FullMAC** chips (e.g. Broadcom `dhd` on Android) where a raw nl80211 `CONNECT` from a third-party process is refused (association `status 1`). Drives a real `wpa_supplicant` (needs the binary, built with `CONFIG_WPS=y`) and feeds its `-K -d` output to the same built-in Pixie-Dust cracker. Currently supports `-K` (Pixie-Dust) and `-p` (single PIN → PSK). |
+
+If the native engine reports `association rejected (status 1)` on an internal Android chip, switch to `--wpa-supplicant`.
 
 # Requirements
  - Python 3.6 and above — **standard library only**;
@@ -40,6 +48,8 @@ OneShot is two files — `oneshot.py` plus its helper modules (`nl80211_scan.py`
  git clone --depth 1 https://github.com/fulvius31/OneShot
  ```
 
+> **Android internal Wi-Fi chips.** First **disable Wi-Fi in Android settings** — *disconnecting is not enough*; the system `wpa_supplicant` keeps the chip busy and a raw association is refused (`status 1`). OneShot brings the interface up itself. Most internal phone chips are **FullMAC** (Broadcom/Qualcomm) and reject the native engine's raw nl80211 `CONNECT`; on those, add **`--wpa-supplicant`** (it needs a `wpa_supplicant` binary with `CONFIG_WPS=y` — the system one under `/system/bin` or `/vendor/bin/hw` is auto-detected, or pass `--wpa-supplicant-path`). For reliable native-engine support, an **external USB adapter** (`mac80211`: rtl8812au / mt76 / ath9k_htc) is the best option.
+
 # Usage
 ```
  oneshot.py <arguments>
@@ -63,6 +73,9 @@ OneShot is two files — `oneshot.py` plus its helper modules (`nl80211_scan.py`
      --vuln-list=<filename>   : Use custom file with vulnerable devices list ['vulnwsc.txt']
      --mtk-wifi               : Activate MediaTek Wi-Fi interface driver on startup and deactivate it on exit
                                 (for internal Wi-Fi adapters implemented in MediaTek SoCs). Turn off Wi-Fi in the system settings before using this.
+     --wpa-supplicant         : Drive a real wpa_supplicant instead of the native engine
+                                (for internal FullMAC chips, e.g. Broadcom on Android). Disable system Wi-Fi first.
+     --wpa-supplicant-path=<p>: Path to the wpa_supplicant binary (default: search PATH and Android locations)
      -v, --verbose            : Verbose output
  ```
 
@@ -74,6 +87,10 @@ Pixie Dust attack on a specified BSSID:
 Scan, pick a network, then Pixie Dust:
  ```
  sudo python3 oneshot.py -i wlan0 -K
+ ```
+Pixie Dust on an internal FullMAC chip (Android), driving wpa_supplicant (disable system Wi-Fi first):
+ ```
+ sudo python3 oneshot.py -i wlan0 -b 00:90:4C:C1:AC:21 -K --wpa-supplicant
  ```
 Online WPS bruteforce:
  ```

@@ -29,10 +29,17 @@ cat <<'EOF'
 
 [+] Done.
 
-Run a Pixie-Dust attack (everything is built in — no external binaries):
+First DISABLE Wi-Fi in Android settings (disconnecting is not enough — the system
+wpa_supplicant keeps the chip busy). Then run a Pixie-Dust attack:
 
-    sudo python OneShot/oneshot.py -i wlan0 --iface-down -K
+    sudo python OneShot/oneshot.py -i wlan0 -K
 
-The built-in WPS engine is driver-dependent. If association fails, make sure no
-other supplicant owns wlan0 (stop the system Wi-Fi / NetworkManager first).
+The built-in native engine talks to nl80211 directly. Most internal phone chips
+are FullMAC (Broadcom/Qualcomm) and refuse a raw association (you'll see
+"association rejected (status 1)"). On those, drive wpa_supplicant instead — it
+uses the system binary under /system/bin or /vendor/bin/hw:
+
+    sudo python OneShot/oneshot.py -i wlan0 -b <BSSID> -K --wpa-supplicant
+
+For reliable native-engine support, use an external USB adapter (mac80211).
 EOF

