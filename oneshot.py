@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import sys
-import subprocess
 import os
+import errno
+import fcntl
+import struct
+import socket
 import pathlib
 import time
 from datetime import datetime
@@ -938,18 +941,43 @@ class WiFiScanner:
                     print('Invalid number')
 
 
+IFF_UP = 0x1
+SIOCGIFFLAGS = 0x8913
+SIOCSIFFLAGS = 0x8914
+
+
 def ifaceUp(iface, down=False):
-    if down:
-        action = 'down'
-    else:
-        action = 'up'
-    cmd = ['ip', 'link', 'set', iface, action]
+    """Bring an interface administratively up/down via an ioctl — no 'ip' binary.
+
+    On Android you disable system Wi-Fi first (to stop the framework's
+    wpa_supplicant and free wlan0); OneShot then brings the interface up itself
+    so it can drive nl80211 directly. Returns True on success.
+    """
+    name = iface.encode()[:15]
     try:
-        res = subprocess.run(cmd, shell=False, stdout=sys.stdout, stderr=sys.stdout)
-    except FileNotFoundError:
-        sys.stderr.write("[!] Command 'ip' not found — install iproute2 (Termux: pkg install iproute2)\n")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError as e:
+        sys.stderr.write("[!] Cannot open control socket: {}\n".format(e))
         return False
-    return res.returncode == 0
+    try:
+        # struct ifreq is larger than the fields we touch; pad generously so the
+        # kernel's copy_from_user(sizeof(struct ifreq)) stays in-bounds.
+        ifr = struct.pack('16sH', name, 0) + b'\x00' * 22
+        flags = struct.unpack('16sH', fcntl.ioctl(sock, SIOCGIFFLAGS, ifr)[:18])[1]
+        flags = (flags & ~IFF_UP if down else flags | IFF_UP) & 0xFFFF
+        ifr = struct.pack('16sH', name, flags) + b'\x00' * 22
+        fcntl.ioctl(sock, SIOCSIFFLAGS, ifr)
+        return True
+    except OSError as e:
+        if e.errno == errno.ENODEV:
+            sys.stderr.write("[!] Interface '{}' not found — enable the Wi-Fi driver "
+                             "(e.g. --mtk-wifi) or use an external USB adapter\n".format(iface))
+        else:
+            sys.stderr.write("[!] Could not bring '{}' {}: {}\n".format(
+                iface, 'down' if down else 'up', e))
+        return False
+    finally:
+        sock.close()
 
 
 def die(msg):
