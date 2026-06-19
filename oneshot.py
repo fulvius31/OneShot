@@ -6,7 +6,6 @@ import errno
 import fcntl
 import struct
 import socket
-import pathlib
 import time
 from datetime import datetime
 import collections
@@ -474,6 +473,36 @@ class WPSpin:
         return self._with_checksum(int(prepin))
 
 
+def _data_root():
+    """Return a writable <base>/.OneShot directory, creating it.
+
+    Running as root (e.g. via tsu on Android) often makes Path.home() resolve to
+    '/', which is read-only. os.access(W_OK) is unreliable for root (it ignores
+    read-only mounts), so probe each candidate by actually trying to create the
+    directory and fall through on failure: $HOME, the Termux home, the script's
+    own directory, then the cwd.
+    """
+    script_dir = os.path.dirname(os.path.realpath(__file__))
+    candidates = [
+        os.environ.get('HOME'),
+        '/data/data/com.termux/files/home',   # Termux home (root loses HOME)
+        script_dir,
+        os.getcwd(),
+    ]
+    last_err = None
+    for base in candidates:
+        if not base:
+            continue
+        root = os.path.join(base, '.OneShot')
+        try:
+            os.makedirs(root, exist_ok=True)
+            return root
+        except OSError as e:
+            last_err = e
+    die('[!] Could not create a writable .OneShot directory (tried HOME, Termux '
+        'home, script dir, cwd): {}'.format(last_err))
+
+
 class PixiewpsData:
     def __init__(self):
         self.pke = ''
@@ -545,13 +574,12 @@ class Companion:
         self.pixie_creds = PixiewpsData()
         self.connection_status = ConnectionStatus()
 
-        user_home = str(pathlib.Path.home())
-        self.sessions_dir = f'{user_home}/.OneShot/sessions/'
-        self.pixiewps_dir = f'{user_home}/.OneShot/pixiewps/'
-        self.reports_dir = f'{user_home}/.OneShot/reports/'
+        data_root = _data_root()   # writable <base>/.OneShot (handles root HOME=/)
+        self.sessions_dir = data_root + '/sessions/'
+        self.pixiewps_dir = data_root + '/pixiewps/'
+        self.reports_dir = data_root + '/reports/'
         for d in (self.sessions_dir, self.pixiewps_dir):
-            if not os.path.exists(d):
-                os.makedirs(d)
+            os.makedirs(d, exist_ok=True)
 
         self.generator = WPSpin()
 
@@ -812,7 +840,7 @@ class WiFiScanner:
         # Load pins.csv MAC prefixes once instead of re-reading per network.
         self.vuln_prefixes = WPSpin._load_pin_db()
 
-        reports_fname = str(pathlib.Path.home()) + '/.OneShot/reports/stored.csv'
+        reports_fname = _data_root() + '/reports/stored.csv'
         try:
             with open(reports_fname, 'r', newline='', encoding='utf-8', errors='replace') as file:
                 csvReader = csv.reader(file, delimiter=';', quoting=csv.QUOTE_ALL)
