@@ -715,11 +715,24 @@ class WpsConnection:
         try:
             eapol.send(eapol_start())
             self._log('→ EAPOL-Start')
+            got_any = False
+            starts = 1
             while True:
                 info = self._recv_eap(eapol)
                 if info is None:
+                    if not got_any and starts < 3:
+                        starts += 1
+                        eapol.send(eapol_start())
+                        self._log('→ EAPOL-Start (retry {})'.format(starts))
+                        continue
+                    if not got_any:
+                        print('[!] No EAPOL response from the AP. The interface associated but '
+                              'no EAP/EAPOL reached us — your Wi-Fi chip likely does not expose '
+                              'EAPOL to userspace (FullMAC). Use an external USB adapter '
+                              '(mac80211: rtl8812au/mt76/ath9k_htc), or verify WPS is enabled.')
                     self._log('(timeout: no further EAP frames)')
                     break
+                got_any = True
                 if info['code'] == EAP_CODE_FAIL:
                     self._log('← EAP-Failure')
                     break
