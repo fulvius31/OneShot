@@ -599,7 +599,22 @@ class Companion:
             file.write(pin)
         print('[i] PIN saved in {}'.format(filename))
 
+    def __probe_serial(self, bssid, ssid):
+        """Best-effort: read the AP's WPS Serial Number from M1 (often a placeholder)."""
+        try:
+            import wps_connect
+            serial = wps_connect.WpsConnection(self.interface, bssid, ssid or '').probe_serial()
+        except Exception:
+            return None
+        if serial:
+            print("[i] Using serial '{}' from the WPS IE (may be a placeholder)".format(serial))
+        return serial
+
     def __prompt_wpspin(self, bssid, ssid=None, serial=None):
+        if not serial:
+            # Fall back to the serial the AP advertises in its WPS IE so the
+            # Belkin/Orange algorithms can be suggested without --serial.
+            serial = self.__probe_serial(bssid, ssid)
         pins = self.generator.getSuggested(bssid, ssid=ssid, serial=serial)
         if len(pins) > 1:
             print(f'PINs generated for {bssid}:')

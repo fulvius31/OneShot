@@ -38,12 +38,13 @@ class _MirrorEnrollee:
         self.es2 = os.urandom(wc.NONCE_LEN)
         self.authkey = None
 
-    def build_m1(self):
+    def build_m1(self, serial=b'AP-SERIAL-1'):
         msg = (wps.attr_u8(wps.ATTR_VERSION, wps.WPS_VERSION)
                + wps.attr_u8(wps.ATTR_MSG_TYPE, wps.WPS_M1)
                + wps.attr(wps.ATTR_ENROLLEE_NONCE, self.nonce_e)
                + wps.attr(wps.ATTR_PUBLIC_KEY, self.pke)
-               + wps.attr(wps.ATTR_MAC_ADDR, self.mac))
+               + wps.attr(wps.ATTR_MAC_ADDR, self.mac)
+               + wps.attr(wps.ATTR_SERIAL_NUMBER, serial))
         self._m1 = msg
         return msg
 
@@ -136,9 +137,10 @@ class TestRegistrarExchange(unittest.TestCase):
         reg = wps.WpsRegistrar(registrar_mac=b'\x00\x11\x22\x33\x44\x55')
 
         # M1 (AP -> registrar)
-        reg.process_m1(enrollee.build_m1())
+        reg.process_m1(enrollee.build_m1(serial=b'AP-SERIAL-1'))
         self.assertEqual(reg.pke, enrollee.pke)
         self.assertEqual(reg.nonce_e, enrollee.nonce_e)
+        self.assertEqual(reg.ap_serial, 'AP-SERIAL-1')   # serial extracted from M1
 
         # M2 (registrar -> AP) — enrollee must derive the SAME AuthKey and
         # accept our Authenticator.

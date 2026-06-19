@@ -267,6 +267,7 @@ class WpsRegistrar:
         self.pke = None
         self.nonce_e = None
         self.enrollee_mac = None
+        self.ap_serial = None   # AP's WPS Serial Number attribute (often a placeholder)
         self.authkey = self.keywrapkey = self.emsk = None
         self.psk1 = self.psk2 = None
         # filled from M3
@@ -289,6 +290,7 @@ class WpsRegistrar:
         self.pke = a[ATTR_PUBLIC_KEY]
         self.nonce_e = a[ATTR_ENROLLEE_NONCE]
         self.enrollee_mac = a[ATTR_MAC_ADDR]
+        self.ap_serial = (a.get(ATTR_SERIAL_NUMBER) or b'').decode('utf-8', 'replace') or None
         self.authkey, self.keywrapkey, self.emsk = derive_keys(
             self.pke, self.dh_priv, self.nonce_e, self.enrollee_mac, self.nonce_r)
         if self.pin is not None:
@@ -615,6 +617,9 @@ class WpsConnection:
                 mtype = attrs_dict(msg).get(ATTR_MSG_TYPE)
                 if mtype == bytes([WPS_M1]):
                     reg.process_m1(msg)
+                    if stop == 'm1':   # just wanted the device attributes (serial)
+                        eapol.send(eap_wsc_response(info['id'], WSC_NACK, b''))
+                        break
                     eapol.send(eap_wsc_response(info['id'], WSC_MSG, reg.build_m2()))
                 elif mtype == bytes([WPS_M3]):
                     reg.process_m3(msg)
@@ -659,3 +664,13 @@ class WpsConnection:
         reg = WpsRegistrar(self._own_mac(), pin=str(pin))
         self._drive(reg, stop='m5')
         return reg.reached_m5
+
+    def probe_serial(self):
+        """Associate, read M1, and return the AP's WPS Serial Number (or None).
+
+        Note: this is the serial the AP advertises in WPS, which is frequently a
+        placeholder rather than the real device serial.
+        """
+        reg = WpsRegistrar(self._own_mac())
+        self._drive(reg, stop='m1')
+        return reg.ap_serial
