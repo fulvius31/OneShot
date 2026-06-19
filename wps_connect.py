@@ -686,11 +686,12 @@ def _await_connect_result(sock, family_id, verbose=False):
                 status = struct.unpack('=H', sc[:2])[0] if sc and len(sc) >= 2 else 0
                 if status != 0:
                     raise nl.Nl80211Error(
-                        'association rejected (status {}). Most likely the interface is '
-                        'still connected to / managed by the system Wi-Fi: disconnect from '
-                        'the current network in Android settings (keep the Wi-Fi radio ON so '
-                        'the interface stays up), then retry. A live connection on another '
-                        'channel blocks associating to the target.'.format(status))
+                        'association rejected (status {}). Likely causes: (1) the system '
+                        'Wi-Fi still owns the chip — on Android fully DISABLE Wi-Fi (this '
+                        'stops the framework wpa_supplicant; merely disconnecting is not '
+                        'enough), then retry; (2) the target is on a 5 GHz channel that the '
+                        'regulatory domain marks no-IR (passive/scan-only), which forbids '
+                        'initiating association — try a 2.4 GHz target instead.'.format(status))
                 return
             i += _align_msg(mlen)
 
