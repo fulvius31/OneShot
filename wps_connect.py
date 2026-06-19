@@ -546,10 +546,19 @@ WPS_REQ_TYPE_REGISTRAR = 0x02
 
 
 def wsc_assoc_ie():
-    """WSC IE for the (re)association request advertising an External Registrar."""
+    """WSC IE for the (re)association request advertising an External Registrar.
+
+    Byte-for-byte the same as hostap's wps_build_assoc_req_ie(WPS_REQ_REGISTRAR):
+    OUI+type, Version(0x10), RequestType(Registrar), then the WFA vendor extension
+    carrying Version2(0x20). A WPS 2.0 AP (Ralink/MTK included) can reject the
+    open association outright if the Version2 ext is missing — that surfaces as a
+    status-1 association reject, not just "WPS doesn't start".
+    """
+    v2_ext = WFA_VENDOR_EXT + bytes([0x00, 0x01, WPS_VERSION2])   # WFA_ELEM_VERSION2
     body = (b'\x00\x50\xf2\x04'                            # WPS OUI 00:50:F2 + type 0x04
             + attr_u8(ATTR_VERSION, WPS_VERSION)
-            + attr_u8(ATTR_REQUEST_TYPE, WPS_REQ_TYPE_REGISTRAR))
+            + attr_u8(ATTR_REQUEST_TYPE, WPS_REQ_TYPE_REGISTRAR)
+            + attr(ATTR_VENDOR_EXT, v2_ext))
     return bytes([0xDD, len(body)]) + body                 # element id 221 (vendor)
 
 
