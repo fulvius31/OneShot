@@ -445,6 +445,7 @@ NL80211_ATTR_AUTH_TYPE = 53
 NL80211_ATTR_IE = 42
 NL80211_ATTR_WIPHY_FREQ = 38
 NL80211_ATTR_STATUS_CODE = 48
+NL80211_ATTR_CONTROL_PORT = 84
 NL80211_ATTR_SOCKET_OWNER = 204
 NL80211_AUTHTYPE_OPEN_SYSTEM = 0
 ATTR_REQUEST_TYPE = 0x103a
@@ -487,12 +488,21 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0):
     sock.bind((0, 0))
     sock.settimeout(8)
     try:
-        family_id, _ = nl._resolve_family(sock, 'nl80211')
+        family_id, mcast = nl._resolve_family(sock, 'nl80211')
+        # The CONNECT result is delivered as an event on the 'mlme' multicast
+        # group — join it or _await_connect_result never sees the result.
+        grp = mcast.get('mlme')
+        if grp is not None:
+            try:
+                sock.setsockopt(nl.SOL_NETLINK, nl.NETLINK_ADD_MEMBERSHIP, grp)
+            except OSError:
+                pass
         attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
                  + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
                  + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
                  + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
                  + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
+                 + nl._attr(NL80211_ATTR_CONTROL_PORT, b'')
                  + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
         if freq:
             attrs += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
