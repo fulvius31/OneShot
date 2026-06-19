@@ -622,39 +622,30 @@ def associate(interface, bssid_bytes, ssid_bytes, freq=0, verbose=False):
                 sock.setsockopt(nl.SOL_NETLINK, nl.NETLINK_ADD_MEMBERSHIP, grp)
             except OSError:
                 pass
-        base = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
-                + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
-                + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
-                + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
-                + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
-                + nl._attr(NL80211_ATTR_CONTROL_PORT, b'')   # userspace owns 802.1X port
-                + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
+        attrs = (nl._attr(NL80211_ATTR_IFINDEX, struct.pack('=I', ifindex))
+                 + nl._attr(NL80211_ATTR_MAC, bssid_bytes)
+                 + nl._attr(NL80211_ATTR_SSID, ssid_bytes)
+                 + nl._attr(NL80211_ATTR_AUTH_TYPE, struct.pack('=I', NL80211_AUTHTYPE_OPEN_SYSTEM))
+                 + nl._attr(NL80211_ATTR_IE, wsc_assoc_ie())
+                 + nl._attr(NL80211_ATTR_CONTROL_PORT, b'')   # userspace owns 802.1X port
+                 + nl._attr(NL80211_ATTR_SOCKET_OWNER, b''))
         if freq:
-            base += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
-        over_nl80211 = (nl._attr(NL80211_ATTR_CONTROL_PORT_OVER_NL80211, b'')
-                        + nl._attr(NL80211_ATTR_CONTROL_PORT_ETHERTYPE, struct.pack('=H', ETH_P_PAE)))
+            attrs += nl._attr(NL80211_ATTR_WIPHY_FREQ, struct.pack('=I', freq))
 
-        # Prefer control-port-over-nl80211 (FullMAC EAPOL); fall back to AF_PACKET
-        # if the driver rejects it (EOPNOTSUPP / -95).
-        seq = 10
-        for use_nl, attrs, label in ((True, base + over_nl80211, 'control-port-over-nl80211'),
-                                     (False, base, 'AF_PACKET EAPOL')):
-            nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, seq,
-                                        nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
-            seq += 1
-            try:
-                for _ in nl._read_until_done(sock):   # CONNECT command ACK
-                    pass
-            except nl.Nl80211Error as e:
-                if use_nl:
-                    _wlog(verbose, 'CONNECT with {} rejected ({}); falling back to AF_PACKET'.format(label, e))
-                    continue
-                raise
-            _wlog(verbose, '→ NL80211_CMD_CONNECT accepted ({})'.format(label))
-            _await_connect_result(sock, family_id, verbose)
-            _wlog(verbose, '← CONNECT result: associated (status 0)')
-            return sock, family_id, ifindex, use_nl
-        raise nl.Nl80211Error('CONNECT failed (no supported control-port mode)')
+        # A single plain CONNECT, exactly like wpa_supplicant on a driver without
+        # control-port-over-nl80211. With over_nl80211 NOT requested, the kernel
+        # uses its legacy behaviour and delivers EAPOL to the netdev (AF_PACKET),
+        # so we never need that path — and never trigger its -95 / a second
+        # CONNECT on the same socket. EAPOL transport is therefore always
+        # AF_PACKET here (the returned over_nl80211 flag is always False).
+        nl._send(sock, nl._genl_msg(family_id, NL80211_CMD_CONNECT, 10,
+                                    nl.NLM_F_REQUEST | nl.NLM_F_ACK, attrs))
+        for _ in nl._read_until_done(sock):   # CONNECT command ACK
+            pass
+        _wlog(verbose, '→ NL80211_CMD_CONNECT sent (open auth + WSC registrar IE)')
+        _await_connect_result(sock, family_id, verbose)
+        _wlog(verbose, '← CONNECT result: associated (status 0)')
+        return sock, family_id, ifindex, False
     except Exception:
         sock.close()
         raise
